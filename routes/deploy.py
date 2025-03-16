@@ -2,6 +2,7 @@ from flask import jsonify, request
 import threading
 import time
 import uuid
+import docker
 from docker_utils import get_free_port, run_container
 from db import insert_container
 from config import config
