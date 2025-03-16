@@ -3,8 +3,8 @@ import threading
 import time
 import uuid
 import docker
-from docker_utils import get_free_port, run_container
-from db import insert_container
+from docker_utils import get_free_port, run_container, auto_remove_container
+from db import insert_container, get_container_by_user_uuid
 from config import config
 from . import main_routes
 
