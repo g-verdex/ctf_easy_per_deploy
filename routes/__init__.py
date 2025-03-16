@@ -6,3 +6,4 @@ from .deploy import *
 from .stop import *
 from .restart import *
 from .extend import *
+from .main import index
