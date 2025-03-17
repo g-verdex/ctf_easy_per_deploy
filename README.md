@@ -38,12 +38,21 @@ web интерфейс который можно выдовать учасник
 
 ### Пример настроек
 
+## Подготовка задачи
+
+В вашей задаче обязательно должен быть dockerfile
+
+1. Регестрируемся на `hub.docker.com`
+2. В папке задачи делаем `docker login` и вводим все необходимые данные 
+3. Собираем проект `docker build -t <userName>/<conteiner_neme>:<version> .` 
+4. Отправляем образ на докер хаб `docker image push <userName>/<conteiner_neme>:<version>`
+
 ```yaml
 environment:
     - LEAVE_TIME = 1800 # Время жизни (сек)
     - ADD_TIME = 600 # Время добавки жизни (сек)
     - IMAGES_NAME = # Ваш докер образ на докер хабе 
-    - PORT_IN_CONTAINER = # порт на котором развернуто приложения в контейнере 
+    - PORT_IN_CONTAINER = <userName>/<conteiner_neme>:<version># порт на котором развернуто приложения в контейнере 
     - START_RANGE = 9000 # начало интервала свободных портов
     - STOP_RANGE = 10000 # конец интервала свободных портов 
 
