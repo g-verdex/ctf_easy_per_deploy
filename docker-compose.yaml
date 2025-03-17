@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  flask_app:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # Доступ к Docker API
+      - 
+    environment:
+      - LEAVE_TIME=1800  # Время жизни (сек)
+      - ADD_TIME=600  # Время добавки жизни (сек)
+      - IMAGES_NAME=<userName>/<container_name>:<version>  # Ваш докер образ на докер хабе
+      - PORT_IN_CONTAINER=80  # порт на котором развернуто приложения в контейнере
+      - START_RANGE=9000  # начало интервала свободных портов
+      - STOP_RANGE=10000  # конец интервала свободных портов
