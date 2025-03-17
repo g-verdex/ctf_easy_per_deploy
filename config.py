@@ -1,10 +1,10 @@
 import os
 
 # db_path = os.getenv('DB_PATH')
-leave_time = os.getenv('LEAVE_TIME')
-add_time = os.getenv('ADD_TIME')
+leave_time = int(os.getenv('LEAVE_TIME'))
+add_time = int(os.getenv('ADD_TIME'))
 images_name = os.getenv('IMAGES_NAME')
-port_in_container = os.getenv('PORT_IN_CONTAINER')
+port_in_container = int(os.getenv('PORT_IN_CONTAINER'))
 PORT_RANGE = range(int(os.getenv('START_RANGE')), int(os.getenv('STOP_RANGE')))
 
 
