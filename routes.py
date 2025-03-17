@@ -2,7 +2,8 @@ from flask import Flask, jsonify, render_template, request, make_response
 import threading
 import time
 import uuid
-from database import execute_query
+import docker
+from database import execute_query, remove_container_from_db
 from docker_utils import get_free_port, client, auto_remove_container
 from config import images_name, leave_time, add_time
 
