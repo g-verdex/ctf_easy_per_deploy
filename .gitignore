@@ -164,3 +164,7 @@ cython_debug/
 bot/settings.ini
 bot/.vscode/launch.json
 .idea
+
+
+
+containers.db
