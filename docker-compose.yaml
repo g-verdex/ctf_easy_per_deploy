@@ -7,8 +7,7 @@ services:
       - "5000:5000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Доступ к Docker API
-      - db_data:/app/containers.db
-      - 
+      - ./containers.db:/app/containers.db  # Подключение файла базы данных
     environment:
       - LEAVE_TIME=1800  # Время жизни (сек)
       - ADD_TIME=600  # Время добавки жизни (сек)
