@@ -1,6 +1,6 @@
 from flask import jsonify, request
 from docker_utils import client
-from db import get_container_by_user_uuid, delete_container
+from database import get_container_by_user_uuid, delete_container
 from config import config
 from . import main_routes
 import docker

@@ -1,7 +1,7 @@
 from flask import jsonify, request
 import docker
 from docker_utils import client
-from db import get_container_by_user_uuid, update_container_expiration_time
+from database import get_container_by_user_uuid, update_container_expiration_time
 from config import config
 from datetime import datetime
 from . import main_routes
