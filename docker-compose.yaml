@@ -12,7 +12,7 @@ services:
     environment:
       - LEAVE_TIME=1800  # Время жизни (сек)
       - ADD_TIME=600  # Время добавки жизни (сек)
-      - IMAGES_NAME=<userName>/<container_name>:<version>  # Ваш докер образ на докер хабе
+      - IMAGES_NAME=d1temnd/task_images_ozo:1.0.1  # Ваш докер образ на докер хабе
       - PORT_IN_CONTAINER=80  # порт на котором развернуто приложения в контейнере
       - START_RANGE=9000  # начало интервала свободных портов
       - STOP_RANGE=10000  # конец интервала свободных портов
