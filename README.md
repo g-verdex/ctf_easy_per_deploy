@@ -65,6 +65,7 @@ environment:
     - LEAVE_TIME=1800  # Время жизни контейнера (сек)
     - ADD_TIME=600  # Время продления жизни контейнера (сек)
     - IMAGES_NAME=<userName>/<container_name>:<version>  # Образ контейнера на Docker Hub
+    - FALG=exampleCTF{this_is_flag} # Флаг который получаем в прилоежнии через os.getenv('FLAG')
     - PORT_IN_CONTAINER=80  # Порт, на котором развернуто приложение внутри контейнера
     - START_RANGE=9000  # Начало диапазона свободных портов
     - STOP_RANGE=10000  # Конец диапазона свободных портов
