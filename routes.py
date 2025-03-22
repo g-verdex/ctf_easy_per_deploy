@@ -5,7 +5,7 @@ import uuid
 import docker
 from database import execute_query, remove_container_from_db
 from docker_utils import get_free_port, client, auto_remove_container
-from config import IMAGES_NAME, LEAVE_TIME, ADD_TIME
+from config import IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG
 
 app = Flask(__name__)
 
@@ -42,7 +42,7 @@ def deploy_container():
 
     expiration_time = int(time.time()) + LEAVE_TIME
     
-    container = client.containers.run(IMAGES_NAME, detach=True, ports={"80/tcp": port})
+    container = client.containers.run(IMAGES_NAME, detach=True, ports={"80/tcp": port}, environment={'FLAG': FLAG})
 
     execute_query(
         "INSERT INTO containers (id, port, start_time, expiration_time, user_uuid) VALUES (?, ?, ?, ?, ?)",
