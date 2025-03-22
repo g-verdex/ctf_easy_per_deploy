@@ -5,7 +5,7 @@ import uuid
 import docker
 from database import execute_query, remove_container_from_db
 from docker_utils import get_free_port, client, auto_remove_container
-from config import images_name, leave_time, add_time
+from config import IMAGES_NAME, LEAVE_TIME, ADD_TIME
 
 app = Flask(__name__)
 
@@ -20,12 +20,12 @@ def index():
 
     if not user_uuid:
         user_uuid = str(uuid.uuid4())
-        response = make_response(render_template("index.html", user_container=None, add_minutes=(add_time // 60)))
+        response = make_response(render_template("index.html", user_container=None, add_minutes=(ADD_TIME // 60)))
         response.set_cookie('user_uuid', user_uuid)
         return response
 
     user_container = execute_query("SELECT * FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
-    response = make_response(render_template("index.html", user_container=user_container, add_minutes=(add_time // 60)))
+    response = make_response(render_template("index.html", user_container=user_container, add_minutes=(ADD_TIME // 60)))
     return response
 
 @app.route("/deploy", methods=["POST"])
@@ -40,9 +40,9 @@ def deploy_container():
     if not port:
         return jsonify({"error": "No available ports"}), 400
 
-    expiration_time = int(time.time()) + leave_time
+    expiration_time = int(time.time()) + LEAVE_TIME
     
-    container = client.containers.run(images_name, detach=True, ports={"80/tcp": port})
+    container = client.containers.run(IMAGES_NAME, detach=True, ports={"80/tcp": port})
 
     execute_query(
         "INSERT INTO containers (id, port, start_time, expiration_time, user_uuid) VALUES (?, ?, ?, ?, ?)",

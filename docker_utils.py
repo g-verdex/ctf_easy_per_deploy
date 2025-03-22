@@ -1,7 +1,7 @@
 import docker
 import time
 import threading
-from config import port_in_container, PORT_RANGE
+from config import PORT_IN_CONTAINER, PORT_RANGE
 from database import execute_query, remove_container_from_db
 
 client = docker.from_env()
@@ -11,7 +11,7 @@ used_ports = set()
 def is_port_free(port):
     for container in client.containers.list():
         container_ports = container.attrs.get('NetworkSettings', {}).get('Ports', {})
-        for port_binding in container_ports.get(f"{port_in_container}/tcp", []):
+        for port_binding in container_ports.get(f"{PORT_IN_CONTAINER}/tcp", []):
             if port_binding['HostPort'] == str(port):
                 return False
     return True

@@ -1,9 +1,9 @@
 import sqlite3
-from config import db_path
+from config import DB_PATH
 
 # Инициализация базы данных
 def init_db():
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS containers (
@@ -18,7 +18,7 @@ def init_db():
 
 # Функция для выполнения SQL-запросов
 def execute_query(query, params=(), fetchone=False):
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         c.execute(query, params)
         conn.commit()
