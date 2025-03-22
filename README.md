@@ -30,6 +30,7 @@
 ```bash
 git clone https://github.com/d1temnd/ctf_easy_per_deploy.git 
 cd ctf_easy_per_deploy
+# Проводим все необходимые настройки в docker-compose.yaml пример ниже 
 docker compose up --build -d 
 ```  
 
