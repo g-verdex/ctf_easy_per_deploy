@@ -73,3 +73,23 @@ def stop_container():
     remove_container_from_db(container_id)
 
     return jsonify({"message": "Container stopped"})
+
+
+@app.route("/restart", methods=["POST"])
+def restart_container():
+    user_uuid = request.cookies.get('user_uuid')  # Чтение UUID из куки
+
+    container_data = execute_query("SELECT id FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
+    if not container_data:
+        return jsonify({"error": "No active container"}), 400
+    container_id = container_data[0]
+    
+    try:
+        container = client.containers.get(container_id)
+        container.restart()
+    except docker.errors.NotFound:
+        return jsonify({"error": "Container not found"}), 404
+    
+    return jsonify({"message": "Container restarted"})
+
+
