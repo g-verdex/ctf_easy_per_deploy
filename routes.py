@@ -5,7 +5,7 @@ import uuid
 import docker
 from datetime import datetime, timedelta
 from database import execute_query, remove_container_from_db
-from docker_utils import get_free_port, client, auto_remove_container
+from docker_utils import get_free_port, client, auto_remove_container, remove_container
 from config import IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG
 
 app = Flask(__name__)
@@ -64,14 +64,7 @@ def stop_container():
 
     container_id, port = container_data
 
-    try:
-        container = client.containers.get(container_id)
-        container.stop()
-        container.remove()
-    except docker.errors.NotFound:
-        pass
-
-    remove_container_from_db(container_id)
+    remove_container(container_id, port)
 
     return jsonify({"message": "Container stopped"})
 

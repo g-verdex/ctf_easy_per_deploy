@@ -25,11 +25,24 @@ def get_free_port():
             return port
     return None
 
+# Удаление контейнера
+def remove_container(container_id, port):
+    try:
+        container = client.containers.get(container_id)
+        container.remove(force=True)
+        print(f"[SUCCESS] Container {container_id} removed.")
+    except docker.errors.NotFound:
+        print(f"[WARNING] Container {container_id} not found in Docker, but still in database.")
+
+    used_ports.discard(port)
+
+    execute_query("DELETE FROM containers WHERE id = ?", (container_id,))
+    print(f"[SUCCESS] Container {container_id} removed from database.")
+
 # Автоматическое удаление контейнера после истечения времени жизни
 def auto_remove_container(container_id, port):
     try:
         while True:
-            # Получаем данные контейнера из базы данных
             container_data = execute_query("SELECT expiration_time FROM containers WHERE id = ?", (container_id,), fetchone=True)
             if not container_data:
                 print(f"[ERROR] Container {container_id} not found in database. Stopping thread.")
@@ -47,18 +60,7 @@ def auto_remove_container(container_id, port):
             time.sleep(min(time_to_wait, 30))  # Проверяем каждые 30 сек или до истечения времени
 
         print(f"[INFO] Removing container {container_id} due to expiration.")
-
-        try:
-            container = client.containers.get(container_id)
-            container.remove(force=True)
-            print(f"[SUCCESS] Container {container_id} removed.")
-        except docker.errors.NotFound:
-            print(f"[WARNING] Container {container_id} not found in Docker, but still in database.")
-
-        used_ports.discard(port)
-
-        execute_query("DELETE FROM containers WHERE id = ?", (container_id,))
-        print(f"[SUCCESS] Container {container_id} removed from database.")
+        remove_container(container_id, port)
 
     except Exception as e:
         print(f"[ERROR] Unexpected error in auto_remove_container: {e}")
