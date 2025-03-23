@@ -3,6 +3,7 @@ import threading
 import time
 import uuid
 import docker
+from datetime import datetime, timedelta
 from database import execute_query, remove_container_from_db
 from docker_utils import get_free_port, client, auto_remove_container
 from config import IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG
@@ -93,3 +94,32 @@ def restart_container():
     return jsonify({"message": "Container restarted"})
 
 
+
+@app.route("/extend", methods=["POST"])
+def extend_container_lifetime():
+    user_uuid = request.cookies.get('user_uuid')
+
+    container_data = execute_query("SELECT id, expiration_time FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
+    if not container_data:
+        return jsonify({"error": "No active container"}), 400
+        
+    container_id, expiration_time = container_data
+    
+    # Увеличиваем время жизни контейнера на add_time
+    new_expiration_time = expiration_time + ADD_TIME  # добавляем время в секундах
+    
+    # Обновляем время жизни в базе данных
+
+    execute_query(
+        "UPDATE containers SET expiration_time = ? WHERE id = ?", 
+        (new_expiration_time, container_id)
+    )
+
+    # Обновляем время жизни контейнера в Docker (необходимо, если вы хотите обновить внутреннее время контейнера)
+    try:
+        container = client.containers.get(container_id)
+        container.attrs['State']['FinishedAt'] = datetime.fromtimestamp(new_expiration_time).strftime('%Y-%m-%d %H:%M:%S')
+    except docker.errors.NotFound:
+        return jsonify({"error": "Container not found"}), 404
+
+    return jsonify({"message": "Container lifetime extended", "new_expiration_time": new_expiration_time})
