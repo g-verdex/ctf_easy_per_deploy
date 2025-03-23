@@ -94,7 +94,6 @@ def restart_container():
     return jsonify({"message": "Container restarted"})
 
 
-
 @app.route("/extend", methods=["POST"])
 def extend_container_lifetime():
     user_uuid = request.cookies.get('user_uuid')
@@ -109,17 +108,9 @@ def extend_container_lifetime():
     new_expiration_time = expiration_time + ADD_TIME  # добавляем время в секундах
     
     # Обновляем время жизни в базе данных
-
     execute_query(
         "UPDATE containers SET expiration_time = ? WHERE id = ?", 
         (new_expiration_time, container_id)
     )
-
-    # Обновляем время жизни контейнера в Docker (необходимо, если вы хотите обновить внутреннее время контейнера)
-    try:
-        container = client.containers.get(container_id)
-        container.attrs['State']['FinishedAt'] = datetime.fromtimestamp(new_expiration_time).strftime('%Y-%m-%d %H:%M:%S')
-    except docker.errors.NotFound:
-        return jsonify({"error": "Container not found"}), 404
 
     return jsonify({"message": "Container lifetime extended", "new_expiration_time": new_expiration_time})

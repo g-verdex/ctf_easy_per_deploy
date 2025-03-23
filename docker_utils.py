@@ -29,6 +29,7 @@ def get_free_port():
 def auto_remove_container(container_id, port):
     try:
         while True:
+            # Получаем данные контейнера из базы данных
             container_data = execute_query("SELECT expiration_time FROM containers WHERE id = ?", (container_id,), fetchone=True)
             if not container_data:
                 print(f"[ERROR] Container {container_id} not found in database. Stopping thread.")
@@ -43,7 +44,7 @@ def auto_remove_container(container_id, port):
                 break  # Время истекло — удаляем контейнер
 
             print(f"[INFO] Container {container_id} will be checked again in 30 sec. Time left: {time_to_wait}s")
-            time.sleep(min(time_to_wait, 30))  # Проверяем каждые 30 сек
+            time.sleep(min(time_to_wait, 30))  # Проверяем каждые 30 сек или до истечения времени
 
         print(f"[INFO] Removing container {container_id} due to expiration.")
 
