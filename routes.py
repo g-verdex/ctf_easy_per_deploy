@@ -43,20 +43,26 @@ def deploy_container():
 
     expiration_time = int(time.time()) + LEAVE_TIME
 
+    # Создаем запись в базе данных без ID контейнера
+    execute_query(
+        "INSERT INTO containers (id, port, start_time, expiration_time, user_uuid) VALUES (?, ?, ?, ?, ?)",
+        (None, port, int(time.time()), expiration_time, user_uuid)
+    )
+
     # Проверяем, существует ли локальный образ
     try:
         client.images.get(IMAGES_NAME)
     except docker.errors.ImageNotFound:
-        # Если нет - собираем
         build_log = client.images.build(path="./deploy_task", tag=IMAGES_NAME)
         print("Image built:", build_log)
 
-    # Запускаем контейнер с уже существующим образом
+    # Запускаем контейнер
     container = client.containers.run(IMAGES_NAME, detach=True, ports={PORT_IN_CONTAINER: port}, environment={'FLAG': FLAG})
 
+    # Обновляем ID контейнера в БД
     execute_query(
-        "INSERT INTO containers (id, port, start_time, expiration_time, user_uuid) VALUES (?, ?, ?, ?, ?)",
-        (container.id, port, int(time.time()), expiration_time, user_uuid)
+        "UPDATE containers SET id = ? WHERE port = ?",
+        (container.id, port)
     )
 
     threading.Thread(target=auto_remove_container, args=(container.id, port)).start()
