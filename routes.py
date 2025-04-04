@@ -36,22 +36,37 @@ def deploy_container():
     existing_container = execute_query("SELECT * FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
     if existing_container:
         return jsonify({"error": "You already have a running container"}), 400
-    
+
     port = get_free_port()
     if not port:
         return jsonify({"error": "No available ports"}), 400
 
     expiration_time = int(time.time()) + LEAVE_TIME
-    
-    container = client.containers.run(IMAGES_NAME, detach=True, ports={PORT_IN_CONTAINER: port}, environment={'FLAG': FLAG})
 
+    # Создаем запись в базе данных без ID контейнера
     execute_query(
         "INSERT INTO containers (id, port, start_time, expiration_time, user_uuid) VALUES (?, ?, ?, ?, ?)",
-        (container.id, port, int(time.time()), expiration_time, user_uuid)
+        (None, port, int(time.time()), expiration_time, user_uuid)
+    )
+
+    # Проверяем, существует ли локальный образ
+    try:
+        client.images.get(IMAGES_NAME)
+    except docker.errors.ImageNotFound:
+        build_log = client.images.build(path="./deploy_task", tag=IMAGES_NAME)
+        print("Image built:", build_log)
+
+    # Запускаем контейнер
+    container = client.containers.run(IMAGES_NAME, detach=True, ports={PORT_IN_CONTAINER: port}, environment={'FLAG': FLAG})
+
+    # Обновляем ID контейнера в БД
+    execute_query(
+        "UPDATE containers SET id = ? WHERE port = ?",
+        (container.id, port)
     )
 
     threading.Thread(target=auto_remove_container, args=(container.id, port)).start()
-    
+
     return jsonify({"message": "Container started", "port": port, "id": container.id, "expiration_time": expiration_time})
 
 @app.route("/stop", methods=["POST"])
