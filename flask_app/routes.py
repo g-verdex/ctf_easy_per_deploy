@@ -10,6 +10,7 @@ from database import execute_query, record_ip_request, check_ip_rate_limit, get_
 from docker_utils import get_free_port, client, auto_remove_container, remove_container, get_container_status
 from config import (IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
                    CHALLENGE_TITLE, CHALLENGE_DESCRIPTION)
+from captcha import create_captcha, validate_captcha
 
 app = Flask(__name__)
 
@@ -64,6 +65,15 @@ def index():
                                            challenge_description=CHALLENGE_DESCRIPTION))
     return response
 
+@app.route("/get_captcha", methods=["GET"])
+def get_captcha():
+    """Generate a new CAPTCHA challenge"""
+    captcha_id, captcha_image = create_captcha()
+    return jsonify({
+        "captcha_id": captcha_id,
+        "captcha_image": captcha_image
+    })
+
 @app.route("/deploy", methods=["POST"])
 def deploy_container():
     user_uuid = request.cookies.get('user_uuid')
@@ -77,6 +87,17 @@ def deploy_container():
     if check_ip_rate_limit(remote_ip, time_window=3600, max_requests=5):
         logger.warning(f"Rate limit exceeded for IP: {remote_ip}")
         return jsonify({"error": "You have reached the maximum number of deployments allowed per hour."}), 429
+
+    # Validate CAPTCHA
+    data = request.get_json()
+    captcha_id = data.get('captcha_id')
+    captcha_answer = data.get('captcha_answer')
+    
+    if not captcha_id or not captcha_answer:
+        return jsonify({"error": "CAPTCHA verification required"}), 400
+    
+    if not validate_captcha(captcha_id, captcha_answer):
+        return jsonify({"error": "Incorrect CAPTCHA answer. Please try again."}), 400
 
     try:
         existing_container = get_container_by_uuid(user_uuid)
