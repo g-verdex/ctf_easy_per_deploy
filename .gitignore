@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+
 *$py.class
 .idea
 
@@ -165,5 +166,3 @@ cython_debug/
 bot/settings.ini
 bot/.vscode/launch.json
 .idea
-
-
