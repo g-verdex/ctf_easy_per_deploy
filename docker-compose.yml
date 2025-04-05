@@ -26,7 +26,7 @@ services:
     # Port mapping below is only for direct testing
     # When deployed by flask_app, it will use dynamic ports in the 9000-10000 range
     ports:
-      - "8080:80"  # For direct testing access
+      - "44444:80"  # For direct testing access
 
 networks:
   default:
