@@ -1,0 +1,33 @@
+version: '3'
+
+services:
+  flask_app:
+    build: ./flask_app
+    ports:
+      - "6664:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+      - ./.env:/app/.env:ro  # Mount .env file as read-only
+    env_file:
+      - ./.env  # Use the .env file for environment variables
+    restart: unless-stopped
+    stop_signal: SIGINT
+    depends_on:
+      - generic_ctf_task
+  
+  generic_ctf_task:
+    build: 
+      context: ./generic_ctf_task
+      dockerfile: Dockerfile
+    image: localhost/generic_ctf_task:latest
+    environment:
+      - FLAG=${FLAG:-CTF{generic_flag_for_testing}}
+    # Port mapping below is only for direct testing
+    # When deployed by flask_app, it will use dynamic ports in the 9000-10000 range
+    ports:
+      - "44444:80"  # For direct testing access
+
+networks:
+  default:
+    driver: bridge
