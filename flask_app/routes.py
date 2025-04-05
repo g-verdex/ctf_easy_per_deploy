@@ -9,7 +9,7 @@ from datetime import datetime
 from database import execute_query, record_ip_request, check_ip_rate_limit, get_container_by_uuid
 from docker_utils import get_free_port, client, auto_remove_container, remove_container, get_container_status
 from config import (IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
-                   CHALLENGE_TITLE, CHALLENGE_DESCRIPTION)
+                   CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, COMMAND_CONNECT)
 from captcha import create_captcha, validate_captcha
 
 app = Flask(__name__)
@@ -29,6 +29,7 @@ def index():
     
     # Get server hostname for the template
     hostname = request.host.split(':')[0] if ':' in request.host else request.host
+    con_host = COMMAND_CONNECT.replace('<ip>', hostname)
     is_localhost = hostname == '127.0.0.1' or hostname == 'localhost'
 
     if not user_uuid:
@@ -36,7 +37,7 @@ def index():
         response = make_response(render_template("index.html", 
                                                user_container=None, 
                                                add_minutes=(ADD_TIME // 60),
-                                               hostname=hostname,
+                                               hostname=con_host,
                                                challenge_title=CHALLENGE_TITLE,
                                                challenge_description=CHALLENGE_DESCRIPTION))
         
@@ -55,12 +56,14 @@ def index():
     container_status = None
     if user_container:
         container_status = get_container_status(user_container[0])
+        con_host = COMMAND_CONNECT.replace('<ip>', hostname).replace('<port>', str(user_container[1]))
+
     
     response = make_response(render_template("index.html", 
                                            user_container=user_container, 
                                            container_status=container_status,
                                            add_minutes=(ADD_TIME // 60),
-                                           hostname=hostname,
+                                           hostname=con_host,
                                            challenge_title=CHALLENGE_TITLE,
                                            challenge_description=CHALLENGE_DESCRIPTION))
     return response

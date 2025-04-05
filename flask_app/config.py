@@ -14,6 +14,7 @@ FLAG = os.getenv('FLAG', 'CTF{generic_flag_for_testing}')
 PORT_IN_CONTAINER = int(os.getenv('PORT_IN_CONTAINER', '80'))
 PORT_RANGE = range(int(os.getenv('START_RANGE', 9000)), int(os.getenv('STOP_RANGE', 10001)))
 DB_PATH = os.getenv('DB_PATH', './data/containers.db')
+COMMAND_CONNECT = os.getenv('COMMAND_CONNECT', 'https://<ip>:<port>')
 
 # Rate limiting
 MAX_CONTAINERS_PER_HOUR = int(os.getenv('MAX_CONTAINERS_PER_HOUR', 5))

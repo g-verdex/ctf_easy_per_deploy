@@ -184,12 +184,12 @@
                         <div class="challenge-info">
                             <p>🎮 <strong>Access your challenge:</strong></p>
                             <div class="input-group mb-3">
-                                <input type="text" class="form-control bg-dark text-light" id="challenge-url" value="http://{{ hostname }}:{{ user_container[1] }}" readonly>
+                                <input type="text" class="form-control bg-dark text-light" id="challenge-url" value="{{ hostname }}" readonly>
                                 <button class="btn btn-outline-light" type="button" onclick="copyUrl()">Copy</button>
                             </div>
                             <small class="text-light">Click the button to open your challenge in a new window</small>
                             <div class="mt-2">
-                                <a href="http://{{ hostname }}:{{ user_container[1] }}" target="_blank" class="btn btn-sm btn-outline-info">Open Challenge</a>
+                                <a href="{{ hostname }}" target="_blank" class="btn btn-sm btn-outline-info">Open Challenge</a>
                             </div>
                         </div>
                         
