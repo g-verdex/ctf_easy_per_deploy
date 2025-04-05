@@ -1,0 +1,39 @@
+#THIS IS EXAMPLE DOCKER COMPOSE FILE FOR SNAKE GAME, YOU SHOULD EDIT YOURS MANUALLY
+version: '3'
+
+services:
+  flask_app:
+    build: ./flask_app
+    ports:
+      - "6664:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+      - ./.env:/app/.env:ro  # Mount .env file as read-only
+    env_file:
+      - ./.env  # Use the .env file for environment variables
+    restart: unless-stopped
+    stop_signal: SIGINT
+    depends_on:
+      - snake_game
+  
+  snake_game:
+    build: 
+      context: ./snake_game
+      dockerfile: Dockerfile
+    image: localhost/snake_game:latest
+    environment:
+      - FLAG=${FLAG}  # Use flag from .env file
+    # Port mapping below is only for direct testing
+    # When deployed by flask_app, it will use dynamic ports in the 9000-10000 range
+    ports:
+      - "8080:80"  # For direct testing access
+    networks:
+      default:
+        aliases:
+          - snake.ctf.local
+          - visible.ctf.local
+
+networks:
+  default:
+    driver: bridge
