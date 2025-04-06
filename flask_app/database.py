@@ -38,13 +38,25 @@ def init_db():
         conn.commit()
 
 # Function for executing SQL queries
-def execute_query(query, params=(), fetchone=False):
+def execute_query(query, params=(), fetchone=False, fetchall=False):
+    if fetchone and fetchall:
+        raise ValueError("Only one of fetchone or fetchall can be True.")
+
     ensure_db_dir()
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute(query, params)
-        conn.commit()
-        return c.fetchone() if fetchone else c.fetchall()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute(query, params)
+            conn.commit()
+            if fetchone:
+                return c.fetchone()
+            elif fetchall:
+                return c.fetchall()
+            return None
+    except sqlite3.Error as e:
+        print(f"[ERROR] SQLite error: {e}")
+        return None if fetchone else []
+
 
 # Remove container from DB
 def remove_container_from_db(container_id):
