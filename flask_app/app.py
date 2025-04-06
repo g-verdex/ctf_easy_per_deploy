@@ -1,11 +1,9 @@
 from routes import app
 from database import init_db, execute_query
-from docker_utils import auto_remove_expired_containers
 import docker
 import signal
 import sys
 import atexit
-import threading
 
 # Initialize Docker client
 client = docker.from_env()
@@ -46,5 +44,4 @@ signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == "__main__":
     init_db()  # Initialize the database
-    threading.Thread(target=auto_remove_expired_containers, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=True)

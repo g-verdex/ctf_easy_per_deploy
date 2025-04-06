@@ -40,39 +40,30 @@ def remove_container(container_id, port):
     print(f"[SUCCESS] Container {container_id} removed from database.")
 
 # Automatically remove container after expiration time
-def auto_remove_expired_containers():
+def auto_remove_container(container_id, port):
     try:
         while True:
+            container_data = execute_query("SELECT expiration_time FROM containers WHERE id = ?", (container_id,), fetchone=True)
+            if not container_data:
+                print(f"[ERROR] Container {container_id} not found in database. Stopping thread.")
+                return  # Exit the thread
+
+            expiration_time = container_data[0]
+
             current_time = int(time.time())
-            containers = execute_query(
-                "SELECT id, port, expiration_time FROM containers",
-                fetchall=True
-            )
+            time_to_wait = expiration_time - current_time
 
-            soonest_expiration = None
+            if time_to_wait <= 0:
+                break  # Time expired - remove container
 
-            if not containers:
-                print("[INFO] No containers in database.")
-            else:
-                for container_id, port, expiration_time in containers:
-                    time_left = expiration_time - current_time
-                    if time_left <= 0:
-                        print(f"[INFO] Expired container detected: {container_id}. Removing...")
-                        try:
-                            remove_container(container_id, port)
-                        except Exception as remove_err:
-                            print(f"[ERROR] Failed to remove container {container_id}: {remove_err}")
-                    else:
-                        if soonest_expiration is None or time_left < soonest_expiration:
-                            soonest_expiration = time_left
+            print(f"[INFO] Container {container_id} will be checked again in 30 sec. Time left: {time_to_wait}s")
+            time.sleep(min(time_to_wait, 30))  # Check every 30 seconds or until time expires
 
-            # We wait either until the next expiration, or 30 seconds if there are no urgent ones.
-            sleep_time = min(soonest_expiration, 30) if soonest_expiration is not None else 30
-            print(f"[INFO] Next check in {sleep_time} seconds.")
-            time.sleep(sleep_time)
+        print(f"[INFO] Removing container {container_id} due to expiration.")
+        remove_container(container_id, port)
 
     except Exception as e:
-        print(f"[ERROR] Unexpected error in auto_remove_expired_containers: {e}")
+        print(f"[ERROR] Unexpected error in auto_remove_container: {e}")
 
 # Get container status
 def get_container_status(container_id):

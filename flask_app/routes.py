@@ -132,7 +132,7 @@ def deploy_container():
             (container.id, port, int(time.time()), expiration_time, user_uuid, remote_ip)
         )
 
-        # threading.Thread(target=auto_remove_container, args=(container.id, port)).start()
+        threading.Thread(target=auto_remove_container, args=(container.id, port)).start()
         
         return jsonify({
             "message": "Your CTF challenge is ready! Redirecting to your instance...",
