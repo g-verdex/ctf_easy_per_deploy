@@ -106,3 +106,4 @@ def get_all_active_containers():
 # Get container by user UUID
 def get_container_by_uuid(user_uuid):
     return execute_query("SELECT * FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
+

@@ -23,6 +23,9 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('ctf-deployer')
 
+# Define cookie name
+COOKIE_NAME = 'user_uuid'
+
 @app.template_filter('to_datetime')
 def to_datetime_filter(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
@@ -35,8 +38,8 @@ def index():
     hostname = request.host.split(':')[0] if ':' in request.host else request.host
     is_localhost = hostname == '127.0.0.1' or hostname == 'localhost'
 
-    # Create protocol based on host
-    protocol = "https" if not is_localhost and hostname != "localhost" else "http"
+    # Determine protocol (http by default)
+    protocol = "http"
     
     logger.info(f"Index accessed by {request.remote_addr} - Using protocol: {protocol} for hostname: {hostname}")
 
@@ -56,7 +59,7 @@ def index():
             # Development environment - more permissive cookies
             response.set_cookie(COOKIE_NAME, user_uuid, httponly=True, samesite='Lax')
         else:
-            # Production environment - secure cookies
+            # Production environment - less strict cookies for better compatibility
             response.set_cookie(COOKIE_NAME, user_uuid, httponly=True, secure=False, samesite='Lax')
         return response
 
@@ -89,36 +92,54 @@ def get_captcha():
 
 @app.route("/deploy", methods=["POST"])
 def deploy_container():
-    user_uuid = request.cookies.get('user_uuid')
-    
-    if not user_uuid:
-        return jsonify({"error": "Session error. Please refresh the page."}), 400
-    
-    remote_ip = request.remote_addr
-    
-    # Check if IP has hit rate limits (5 containers per hour)
-    if check_ip_rate_limit(remote_ip, time_window=3600, max_requests=5):
-        logger.warning(f"Rate limit exceeded for IP: {remote_ip}")
-        return jsonify({"error": "You have reached the maximum number of deployments allowed per hour."}), 429
-
-    # Validate CAPTCHA
-    data = request.get_json()
-    captcha_id = data.get('captcha_id')
-    captcha_answer = data.get('captcha_answer')
-    
-    if not captcha_id or not captcha_answer:
-        return jsonify({"error": "CAPTCHA verification required"}), 400
-    
-    if not validate_captcha(captcha_id, captcha_answer):
-        return jsonify({"error": "Incorrect CAPTCHA answer. Please try again."}), 400
-
     try:
+        user_uuid = request.cookies.get(COOKIE_NAME)
+        
+        if not user_uuid:
+            logger.error(f"Session error: No {COOKIE_NAME} cookie found")
+            return jsonify({"error": "Session error. Please refresh the page."}), 400
+        
+        remote_ip = request.remote_addr
+        logger.info(f"Deploy request from IP: {remote_ip}, UUID: {user_uuid}")
+        
+        # Check if IP has hit rate limits
+        if check_ip_rate_limit(remote_ip, time_window=3600, max_requests=5):
+            logger.warning(f"Rate limit exceeded for IP: {remote_ip}")
+            return jsonify({"error": "You have reached the maximum number of deployments allowed per hour."}), 429
+
+        # Log request data for debugging
+        try:
+            data = request.get_json()
+            logger.info(f"Request data: {data}")
+            
+            if not data:
+                logger.error("No JSON data in request")
+                return jsonify({"error": "Invalid request format. Please refresh and try again."}), 400
+                
+            captcha_id = data.get('captcha_id')
+            captcha_answer = data.get('captcha_answer')
+            
+            if not captcha_id or not captcha_answer:
+                logger.error(f"Missing captcha data: id={captcha_id}, answer={captcha_answer}")
+                return jsonify({"error": "CAPTCHA verification required"}), 400
+            
+            logger.info(f"Validating captcha: id={captcha_id}, answer={captcha_answer}")
+            if not validate_captcha(captcha_id, captcha_answer):
+                logger.error(f"Incorrect captcha answer: {captcha_answer}")
+                return jsonify({"error": "Incorrect CAPTCHA answer. Please try again."}), 400
+                
+        except Exception as e:
+            logger.error(f"Error parsing request data: {str(e)}")
+            return jsonify({"error": "Invalid request format. Please refresh and try again."}), 400
+
         existing_container = get_container_by_uuid(user_uuid)
         if existing_container:
+            logger.warning(f"User {user_uuid} already has container: {existing_container[0]}")
             return jsonify({"error": "You already have a running container"}), 400
         
         port = get_free_port()
         if not port:
+            logger.error("No available ports")
             return jsonify({"error": "No available ports. Please try again later."}), 400
 
         expiration_time = int(time.time()) + LEAVE_TIME
@@ -165,6 +186,7 @@ def deploy_container():
         
         # Create container with configured settings
         container = client.containers.run(**container_config)
+        logger.info(f"Created container: {container.id}")
 
         # Record this IP request
         record_ip_request(remote_ip)
@@ -183,12 +205,12 @@ def deploy_container():
             "expiration_time": expiration_time
         })
     except Exception as e:
-        logger.error(f"Error in deploy_container: {str(e)}")
+        logger.error(f"Unhandled error in deploy_container: {str(e)}")
         return jsonify({"error": f"Failed to start container: {str(e)}"}), 500
 
 @app.route("/stop", methods=["POST"])
 def stop_container():
-    user_uuid = request.cookies.get('user_uuid')
+    user_uuid = request.cookies.get(COOKIE_NAME)
     
     if not user_uuid:
         return jsonify({"error": "Session error. Please refresh the page."}), 400
@@ -208,7 +230,7 @@ def stop_container():
 
 @app.route("/restart", methods=["POST"])
 def restart_container():
-    user_uuid = request.cookies.get('user_uuid')
+    user_uuid = request.cookies.get(COOKIE_NAME)
     
     if not user_uuid:
         return jsonify({"error": "Session error. Please refresh the page."}), 400
@@ -231,7 +253,7 @@ def restart_container():
 
 @app.route("/extend", methods=["POST"])
 def extend_container_lifetime():
-    user_uuid = request.cookies.get('user_uuid')
+    user_uuid = request.cookies.get(COOKIE_NAME)
     
     if not user_uuid:
         return jsonify({"error": "Session error. Please refresh the page."}), 400
