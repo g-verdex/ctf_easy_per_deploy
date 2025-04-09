@@ -7,9 +7,13 @@ import logging
 import os
 from datetime import datetime
 from database import execute_query, record_ip_request, check_ip_rate_limit, get_container_by_uuid
-from docker_utils import get_free_port, client, auto_remove_container, remove_container, get_container_status
+from docker_utils import (get_free_port, client, auto_remove_container, remove_container, 
+                        get_container_status, get_container_security_options, 
+                        get_container_capabilities, get_container_tmpfs)
 from config import (IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
-                   CHALLENGE_TITLE, CHALLENGE_DESCRIPTION)
+                   CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
+                   CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
+                   ENABLE_READ_ONLY)
 from captcha import create_captcha, validate_captcha
 
 app = Flask(__name__)
@@ -113,13 +117,45 @@ def deploy_container():
         # Create a shortened UUID for container naming
         short_uuid = user_uuid.split('-')[0] if '-' in user_uuid else user_uuid[:8]
         
-        container = client.containers.run(
-            IMAGES_NAME, 
-            detach=True, 
-            ports={f"{PORT_IN_CONTAINER}/tcp": port}, 
-            environment={'FLAG': FLAG},
-            hostname=f"ctf-challenge-{short_uuid}"
-        )
+        # Get security options
+        security_options = get_container_security_options()
+        
+        # Get capability options
+        capabilities = get_container_capabilities()
+        
+        # Get tmpfs configuration
+        tmpfs = get_container_tmpfs()
+        
+        # Prepare container configuration
+        container_config = {
+            'image': IMAGES_NAME,
+            'detach': True,
+            'ports': {f"{PORT_IN_CONTAINER}/tcp": port},
+            'environment': {'FLAG': FLAG},
+            'hostname': f"ctf-challenge-{short_uuid}",
+            'security_opt': security_options,
+            'mem_limit': CONTAINER_MEMORY_LIMIT,
+            'memswap_limit': CONTAINER_SWAP_LIMIT,
+            'cpu_period': 100000,  # Default period (100ms)
+            'cpu_quota': int(100000 * CONTAINER_CPU_LIMIT),  # Adjust quota based on CPU limit
+            'pids_limit': CONTAINER_PIDS_LIMIT,
+            'read_only': ENABLE_READ_ONLY
+        }
+        
+        # Add capabilities if needed
+        if capabilities['drop_all']:
+            container_config['cap_drop'] = ['ALL']
+            container_config['cap_add'] = capabilities['add']
+        
+        # Add tmpfs if configured
+        if tmpfs:
+            container_config['tmpfs'] = tmpfs
+        
+        # Log the container configuration for debugging
+        logger.info(f"Container configuration: {container_config}")
+        
+        # Create container with configured settings
+        container = client.containers.run(**container_config)
 
         # Record this IP request
         record_ip_request(remote_ip)

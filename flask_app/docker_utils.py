@@ -1,7 +1,10 @@
 import docker
 import time
 import threading
-from config import PORT_IN_CONTAINER, PORT_RANGE
+from config import (PORT_IN_CONTAINER, PORT_RANGE, CONTAINER_MEMORY_LIMIT, 
+                   CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
+                   ENABLE_NO_NEW_PRIVILEGES, ENABLE_READ_ONLY, ENABLE_TMPFS, TMPFS_SIZE,
+                   DROP_ALL_CAPABILITIES, CAP_NET_BIND_SERVICE, CAP_CHOWN)
 from database import execute_query, remove_container_from_db
 
 client = docker.from_env()
@@ -84,3 +87,38 @@ def get_container_status(container_id):
             'status': 'error',
             'running': False
         }
+
+# Configure security options for container
+def get_container_security_options():
+    security_options = []
+    
+    # Add no-new-privileges if enabled
+    if ENABLE_NO_NEW_PRIVILEGES:
+        security_options.append("no-new-privileges:true")
+    
+    # We're not adding a seccomp profile to use Docker's default implicitly
+    
+    return security_options
+
+# Configure container capabilities
+def get_container_capabilities():
+    capabilities = {
+        'drop_all': DROP_ALL_CAPABILITIES,
+        'add': []
+    }
+    
+    # Add capabilities if needed
+    if CAP_NET_BIND_SERVICE:
+        capabilities['add'].append('NET_BIND_SERVICE')
+    
+    if CAP_CHOWN:
+        capabilities['add'].append('CHOWN')
+    
+    return capabilities
+
+# Configure container tmpfs if enabled
+def get_container_tmpfs():
+    if not ENABLE_TMPFS:
+        return None
+    
+    return {'/tmp': f'exec,size={TMPFS_SIZE}'}
