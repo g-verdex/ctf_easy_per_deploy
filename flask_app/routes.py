@@ -29,30 +29,38 @@ def to_datetime_filter(timestamp):
 
 @app.route("/")
 def index():
-    user_uuid = request.cookies.get('user_uuid')
+    user_uuid = request.cookies.get(COOKIE_NAME)
     
     # Get server hostname for the template
     hostname = request.host.split(':')[0] if ':' in request.host else request.host
     is_localhost = hostname == '127.0.0.1' or hostname == 'localhost'
 
+    # Create protocol based on host
+    protocol = "https" if not is_localhost and hostname != "localhost" else "http"
+    
+    logger.info(f"Index accessed by {request.remote_addr} - Using protocol: {protocol} for hostname: {hostname}")
+
     if not user_uuid:
         user_uuid = str(uuid.uuid4())
+        logger.info(f"Creating new user UUID: {user_uuid}")
         response = make_response(render_template("index.html", 
                                                user_container=None, 
                                                add_minutes=(ADD_TIME // 60),
                                                hostname=hostname,
+                                               protocol=protocol,
                                                challenge_title=CHALLENGE_TITLE,
                                                challenge_description=CHALLENGE_DESCRIPTION))
         
         # For localhost development, we need less strict cookie settings
         if is_localhost:
             # Development environment - more permissive cookies
-            response.set_cookie('user_uuid', user_uuid, httponly=True, samesite='Lax')
+            response.set_cookie(COOKIE_NAME, user_uuid, httponly=True, samesite='Lax')
         else:
             # Production environment - secure cookies
-            response.set_cookie('user_uuid', user_uuid, httponly=True, secure=True, samesite='Strict')
+            response.set_cookie(COOKIE_NAME, user_uuid, httponly=True, secure=False, samesite='Lax')
         return response
 
+    logger.info(f"Existing user UUID: {user_uuid}")
     user_container = get_container_by_uuid(user_uuid)
     
     # If container exists, check its actual status
@@ -65,6 +73,7 @@ def index():
                                            container_status=container_status,
                                            add_minutes=(ADD_TIME // 60),
                                            hostname=hostname,
+                                           protocol=protocol,
                                            challenge_title=CHALLENGE_TITLE,
                                            challenge_description=CHALLENGE_DESCRIPTION))
     return response
