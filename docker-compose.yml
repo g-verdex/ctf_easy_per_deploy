@@ -2,6 +2,7 @@ version: '4.0'
 
 services:
   flask_app:
+    container_name: ${COMPOSE_PROJECT_NAME}_flask_app
     build: ./flask_app
     ports:
       - "${FLASK_APP_PORT}:5000"
@@ -29,6 +30,7 @@ services:
       - ctf_network
   
   generic_ctf_task:
+    container_name: ${COMPOSE_PROJECT_NAME}_ctf_task
     build: 
       context: ./generic_ctf_task
       dockerfile: Dockerfile
