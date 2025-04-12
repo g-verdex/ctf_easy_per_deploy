@@ -336,7 +336,7 @@ check_existing_containers() {
     
     # Expected container names
     FLASK_APP_NAME="${COMPOSE_PROJECT_NAME}_flask_app"
-    GENERIC_TASK_NAME="${COMPOSE_PROJECT_NAME}_ctf_task"
+    GENERIC_TASK_NAME="${COMPOSE_PROJECT_NAME}_local_stub"
     
     # Check if containers exist
     EXISTING_CONTAINERS=""
