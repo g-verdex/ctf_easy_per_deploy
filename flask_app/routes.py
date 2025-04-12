@@ -196,6 +196,14 @@ def deploy_container():
         
         # Prepare container configuration
         try:
+            # Get the base project name from environment
+            base_project_name = os.environ.get('COMPOSE_PROJECT_NAME', 'ctf_task')
+            
+            # Create a container name based on the base project name and user UUID
+            # Replace hyphens with underscores for valid Docker container names
+            user_id_part = user_uuid.replace('-', '_')
+            container_name = f"{base_project_name}_session_{user_id_part}"
+            
             container_config = {
                 'image': IMAGES_NAME,
                 'detach': True,
@@ -210,7 +218,9 @@ def deploy_container():
                 'pids_limit': CONTAINER_PIDS_LIMIT,
                 'read_only': ENABLE_READ_ONLY,
                 # FIX: Specify the network for proper isolation
-                'network': NETWORK_NAME
+                'network': NETWORK_NAME,
+                # FIX: Specify consistent container naming pattern
+                'name': container_name
             }
             
             # Add capabilities if needed
@@ -244,7 +254,7 @@ def deploy_container():
                 return jsonify({"error": "Cannot connect to Docker daemon."}), 500
                 
             container = client.containers.run(**container_config)
-            logger.info(f"Created container: {container.id}")
+            logger.info(f"Created container: {container.id} with name: {container_name}")
         except Exception as e:
             logger.error(f"Error creating container: {str(e)}")
             return jsonify({"error": f"Failed to create container: {str(e)}"}), 500
