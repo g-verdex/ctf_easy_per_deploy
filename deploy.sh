@@ -541,6 +541,89 @@ check_network_conflicts() {
     log_success "Network conflict check completed."
 }
 
+# Check for subnet conflicts with existing Docker networks
+check_subnet_conflicts() {
+    log_info "Checking for subnet conflicts..."
+    
+    # Get our subnet from environment variables
+    # Ensure the .env file is sourced
+    if [ -z "$NETWORK_SUBNET" ]; then
+        source .env
+    fi
+    
+    # Extract subnet address and CIDR notation
+    SUBNET_ADDRESS=$(echo "$NETWORK_SUBNET" | cut -d'/' -f1)
+    SUBNET_CIDR=$(echo "$NETWORK_SUBNET" | cut -d'/' -f2)
+    
+    log_info "Checking if subnet $NETWORK_SUBNET is already in use..."
+    
+    # List all Docker networks and check their subnets
+    CONFLICT=false
+    CONFLICT_DETAILS=""
+    
+    # Use docker network inspect to get network details
+    NETWORK_LIST=$(docker network ls --format "{{.Name}}" | grep -v "host" | grep -v "none" | grep -v "bridge")
+    
+    for network in $NETWORK_LIST; do
+        # Skip our own network if it exists
+        if [ "$network" = "$NETWORK_NAME" ]; then
+            continue
+        fi
+        
+        # Get subnet for this network
+        EXISTING_SUBNET=$(docker network inspect "$network" | grep -A 5 "IPAM" | grep "Subnet" | head -n 1 | cut -d'"' -f4)
+        
+        if [ -z "$EXISTING_SUBNET" ]; then
+            continue  # No subnet configured for this network
+        fi
+        
+        EXISTING_ADDRESS=$(echo "$EXISTING_SUBNET" | cut -d'/' -f1)
+        EXISTING_CIDR=$(echo "$EXISTING_SUBNET" | cut -d'/' -f2)
+        
+        # Check for exact subnet match
+        if [ "$EXISTING_SUBNET" = "$NETWORK_SUBNET" ]; then
+            CONFLICT=true
+            CONFLICT_DETAILS="Subnet $NETWORK_SUBNET is already used by network '$network'"
+            break
+        fi
+        
+        # Convert subnet addresses to decimal for comparison
+        IFS='.' read -r -a OUR_OCTETS <<< "$SUBNET_ADDRESS"
+        IFS='.' read -r -a EXISTING_OCTETS <<< "$EXISTING_ADDRESS"
+        
+        OUR_DECIMAL=$((${OUR_OCTETS[0]}*256*256*256 + ${OUR_OCTETS[1]}*256*256 + ${OUR_OCTETS[2]}*256 + ${OUR_OCTETS[3]}))
+        EXISTING_DECIMAL=$((${EXISTING_OCTETS[0]}*256*256*256 + ${EXISTING_OCTETS[1]}*256*256 + ${EXISTING_OCTETS[2]}*256 + ${EXISTING_OCTETS[3]}))
+        
+        # Calculate subnet sizes
+        OUR_SIZE=$((2**(32-$SUBNET_CIDR)))
+        EXISTING_SIZE=$((2**(32-$EXISTING_CIDR)))
+        
+        # Calculate subnet start and end addresses
+        OUR_START=$OUR_DECIMAL
+        OUR_END=$((OUR_START + OUR_SIZE - 1))
+        
+        EXISTING_START=$EXISTING_DECIMAL
+        EXISTING_END=$((EXISTING_START + EXISTING_SIZE - 1))
+        
+        # Check for overlap
+        if [ $OUR_START -le $EXISTING_END ] && [ $OUR_END -ge $EXISTING_START ]; then
+            CONFLICT=true
+            CONFLICT_DETAILS="Subnet $NETWORK_SUBNET overlaps with subnet $EXISTING_SUBNET used by network '$network'"
+            break
+        fi
+    done
+    
+    # If conflict found, report and exit
+    if [ "$CONFLICT" = true ]; then
+        log_error "Subnet conflict detected!"
+        log_error "$CONFLICT_DETAILS"
+        log_error "Please update your NETWORK_SUBNET in .env to avoid conflicts"
+        exit 1
+    fi
+    
+    log_success "No subnet conflicts detected."
+}
+
 # Check for port conflicts
 check_port_conflicts() {
     log_info "Checking for port conflicts..."
@@ -824,6 +907,7 @@ main() {
             clean_data_directory
             # Important: First check network/port conflicts to validate lock files
             check_network_conflicts
+            check_subnet_conflicts
             check_port_conflicts
             
             # Clean the containers database
@@ -872,3 +956,4 @@ main() {
 }
 # Execute main function with all arguments
 main "$@"
+
