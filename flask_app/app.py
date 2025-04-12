@@ -4,6 +4,7 @@ import docker
 import signal
 import sys
 import atexit
+import os
 
 # Initialize Docker client
 client = docker.from_env()
@@ -44,4 +45,8 @@ signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == "__main__":
     init_db()  # Initialize the database
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    
+    # Get debug mode from environment variable
+    debug_mode = os.environ.get('DEBUG_MODE', '').lower() == 'true'
+    
+    app.run(host="0.0.0.0", port=5000, debug=debug_mode)

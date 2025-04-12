@@ -10,13 +10,21 @@ NC='\033[0m' # No Color
 # Directory for lock files
 LOCK_DIR="/var/lock/ctf_deployer"
 
-# Print styled messages
+# Command and options
+COMMAND=""
+VERBOSE_MODE=false
+
+# Print styled messages based on level
 log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    if [ "$VERBOSE_MODE" = true ]; then
+        echo -e "${BLUE}[INFO]${NC} $1"
+    fi
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    if [ "$VERBOSE_MODE" = true ]; then
+        echo -e "${GREEN}[SUCCESS]${NC} $1"
+    fi
 }
 
 log_warning() {
@@ -27,19 +35,69 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
+log_debug() {
+    if [ "$VERBOSE_MODE" = true ]; then
+        echo -e "${YELLOW}[DEBUG]${NC} $1"
+    fi
+}
+
 # Function to display usage information
 show_usage() {
     echo -e "${BLUE}======== CTF CHALLENGE DEPLOYER ========${NC}"
-    echo -e "Usage: sudo $0 [up|down]"
+    echo -e "Usage: sudo $0 [up|down] [options]"
     echo -e ""
     echo -e "Commands:"
     echo -e "  up     Start the CTF challenge deployment service"
     echo -e "  down   Stop all services and clean up resources"
     echo -e ""
+    echo -e "Options:"
+    echo -e "  -v, --verbose   Enable verbose logging output"
+    echo -e "  -h, --help      Show this help message"
+    echo -e ""
     echo -e "Example:"
-    echo -e "  sudo $0 up     # Start the service"
-    echo -e "  sudo $0 down   # Stop the service"
+    echo -e "  sudo $0 up               # Start the service"
+    echo -e "  sudo $0 up --verbose     # Start the service with verbose logging"
+    echo -e "  sudo $0 down             # Stop the service"
     exit 1
+}
+
+# Parse command line arguments
+parse_args() {
+    # No arguments provided
+    if [ $# -eq 0 ]; then
+        log_error "Missing required argument: 'up' or 'down'"
+        show_usage
+    fi
+
+    # First argument should be the command
+    case "$1" in
+        up|down)
+            COMMAND="$1"
+            shift
+            ;;
+        *)
+            log_error "Invalid command: $1"
+            show_usage
+            ;;
+    esac
+
+    # Process options
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -v|--verbose)
+                VERBOSE_MODE=true
+                log_debug "Verbose mode enabled"
+                ;;
+            -h|--help)
+                show_usage
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_usage
+                ;;
+        esac
+        shift
+    done
 }
 
 # Function to check for required environment variables
@@ -180,7 +238,7 @@ check_root_permissions() {
     
     if [ "$(id -u)" -ne 0 ]; then
         log_error "This script must be run as root or with sudo."
-        log_error "Please run with: sudo $0 [up|down]"
+        log_error "Please run with: sudo $0 [up|down] [options]"
         exit 1
     fi
     
@@ -449,8 +507,7 @@ check_network_conflicts() {
                 log_info "Removing attached containers and network..."
                 
                 # Get container IDs from the network
-
-		CONTAINER_IDS=$(docker network inspect "$NETWORK_NAME" | grep -A 65535 "Containers" |grep -v config-hash |grep -v EndpointID| grep -o '"[a-f0-9]\{64\}"' | tr -d '"')
+                CONTAINER_IDS=$(docker network inspect "$NETWORK_NAME" | grep -A 65535 "Containers" |grep -v config-hash |grep -v EndpointID| grep -o '"[a-f0-9]\{64\}"' | tr -d '"')
                 # Remove each container
                 for container_id in $CONTAINER_IDS; do
                     log_info "Removing container $container_id..."
@@ -476,9 +533,6 @@ check_network_conflicts() {
         fi
     else
         log_info "Network $NETWORK_NAME does not exist yet."
-        
-        # Check for subnet conflicts with existing networks (rest of function remains unchanged)
-        # ...
     fi
     
     log_success "Network conflict check completed."
@@ -537,6 +591,46 @@ check_port_conflicts() {
     fi
     
     log_success "No obvious port conflicts detected."
+}
+
+clean_data_directory() {
+    log_info "Cleaning data directory..."
+    
+    # Get DB_PATH from .env if not already sourced
+    if [ -z "$DB_PATH" ]; then
+        source .env
+    fi
+    
+    # Check if data directory exists
+    if [ ! -d "$(dirname "$DB_PATH")" ]; then
+        log_info "Data directory doesn't exist yet. Nothing to clean."
+        return
+    fi
+    
+    # Remove the containers database if it exists
+    if [ -f "$DB_PATH" ]; then
+        log_info "Removing containers database at $DB_PATH"
+        rm -f "$DB_PATH"
+        log_success "Containers database cleaned."
+    else
+        log_info "No containers database found at $DB_PATH"
+    fi
+    
+    # Clean up any lock files in the data directory
+    if [ -f "./data/lock_file.txt" ]; then
+        local lock_file=$(cat "./data/lock_file.txt")
+        if [ -f "$lock_file" ]; then
+            log_info "Removing port range lock file..."
+            rm -f "$lock_file" 2>/dev/null
+            log_success "Lock file removed."
+        fi
+        rm -f "./data/lock_file.txt"
+    fi
+    
+    # Additional cleanup of temporary files if needed
+    find "./data" -name "*.tmp" -type f -delete 2>/dev/null
+    
+    log_success "Data directory cleaned successfully."
 }
 
 # Safely clean up only our network if it exists and has no containers
@@ -623,10 +717,6 @@ check_services() {
 check_ports() {
     log_info "Verifying port accessibility..."
     
-    # Default values if not set
-    FLASK_APP_PORT=${FLASK_APP_PORT:-6664}
-    DIRECT_TEST_PORT=${DIRECT_TEST_PORT:-44444}
-    
     # Check if ports in use
     if netstat -tuln 2>/dev/null | grep -q ":$FLASK_APP_PORT " || ss -tuln 2>/dev/null | grep -q ":$FLASK_APP_PORT "; then
         log_success "Flask application port $FLASK_APP_PORT is accessible."
@@ -654,20 +744,20 @@ print_access_info() {
 
 # Print recommendations for multi-instance setup
 print_multi_instance_tips() {
-    echo -e "\n${BLUE}======== MULTI-INSTANCE TIPS ========${NC}"
-    echo -e "When running multiple deployer instances on the same host, ensure:"
-    echo -e "1. Each instance uses a different ${YELLOW}NETWORK_NAME${NC} and ${YELLOW}NETWORK_SUBNET${NC} in .env"
-    echo -e "2. Each instance uses a different ${YELLOW}FLASK_APP_PORT${NC} and ${YELLOW}DIRECT_TEST_PORT${NC}"
-    echo -e "3. Each instance has non-overlapping ${YELLOW}START_RANGE${NC} and ${YELLOW}STOP_RANGE${NC} port ranges"
-    echo -e "4. Use separate data directories for each instance to avoid database conflicts"
-    echo -e "5. Each instance uses a unique ${YELLOW}COMPOSE_PROJECT_NAME${NC} in .env"
+    if [ "$VERBOSE_MODE" = true ]; then
+        echo -e "\n${BLUE}======== MULTI-INSTANCE TIPS ========${NC}"
+        echo -e "When running multiple deployer instances on the same host, ensure:"
+        echo -e "1. Each instance uses a different ${YELLOW}NETWORK_NAME${NC} and ${YELLOW}NETWORK_SUBNET${NC} in .env"
+        echo -e "2. Each instance uses a different ${YELLOW}FLASK_APP_PORT${NC} and ${YELLOW}DIRECT_TEST_PORT${NC}"
+        echo -e "3. Each instance has non-overlapping ${YELLOW}START_RANGE${NC} and ${YELLOW}STOP_RANGE${NC} port ranges"
+        echo -e "4. Use separate data directories for each instance to avoid database conflicts"
+        echo -e "5. Each instance uses a unique ${YELLOW}COMPOSE_PROJECT_NAME${NC} in .env"
+    fi
 }
 
 # Show logs for immediate feedback
 show_logs() {
-    log_info "Displaying container logs (press Ctrl+C to exit logs)..."
     echo -e "${BLUE}======== CONTAINER LOGS ========${NC}"
-    
     $DOCKER_COMPOSE logs -f
 }
 
@@ -699,38 +789,43 @@ cleanup() {
 }
 
 # Main function
+# Main function
 main() {
     echo -e "${BLUE}======== CTF CHALLENGE DEPLOYER ========${NC}"
-    log_info "Starting deployment process..."
     
-    # Check if we have exactly one argument
-    if [ $# -ne 1 ]; then
-        log_error "Exactly one argument required: 'up' or 'down'"
-        show_usage
+    # Parse command line arguments
+    parse_args "$@"
+    
+    # Show starting message only if verbose mode is enabled
+    if [ "$VERBOSE_MODE" = true ]; then
+        log_info "Starting deployment process..."
     fi
     
     # Check root permissions first for any operation
     check_root_permissions
     
-    # Process the command based on the argument
-    case "$1" in
+    # Process the command
+    case "$COMMAND" in
         up)
             # Register signal handler
             trap cleanup SIGINT SIGTERM
             
-            # Run pre-checks for all required environment variables
+           # Run pre-checks for all required environment variables
             check_required_env_vars
             
             # Run deployment steps
             check_docker
             detect_docker_compose
             check_env_file
-            
-            # Check for existing containers with the same name
             check_existing_containers
-            
+            clean_data_directory
+            # Important: First check network/port conflicts to validate lock files
             check_network_conflicts
             check_port_conflicts
+            
+            # Clean the containers database
+            
+            # Continue with deployment
             safely_cleanup_network
             check_directories
             build_images
@@ -747,7 +842,9 @@ main() {
                 show_logs
             fi
             
-            log_success "Deployment completed successfully!"
+            if [ "$VERBOSE_MODE" = true ]; then
+                log_success "Deployment completed successfully!"
+            fi
             ;;
             
         down)
@@ -757,14 +854,18 @@ main() {
             
             # Now shutdown services
             shutdown_services
+            
+            # Clean data directory after shutting down
+            clean_data_directory
+            
+            echo -e "${GREEN}Services shut down successfully.${NC}"
             ;;
             
         *)
-            log_error "Invalid argument: $1"
+            log_error "Invalid command: $COMMAND"
             show_usage
             ;;
     esac
 }
-
 # Execute main function with all arguments
 main "$@"
