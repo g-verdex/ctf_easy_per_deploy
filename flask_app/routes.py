@@ -23,7 +23,7 @@ from config import (IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER,
                    CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
                    CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
                    ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW,
-                   NETWORK_NAME)  # Added NETWORK_NAME import
+                   NETWORK_NAME, BYPASS_CAPTCHA)  # Added BYPASS_CAPTCHA import
 from captcha import create_captcha, validate_captcha
 
 app = Flask(__name__)
@@ -62,7 +62,8 @@ def index():
                                                hostname=hostname,
                                                protocol=protocol,
                                                challenge_title=CHALLENGE_TITLE,
-                                               challenge_description=CHALLENGE_DESCRIPTION))
+                                               challenge_description=CHALLENGE_DESCRIPTION,
+                                               bypass_captcha=BYPASS_CAPTCHA))
         
         # For localhost development, we need less strict cookie settings
         if is_localhost:
@@ -88,8 +89,11 @@ def index():
                                            hostname=hostname,
                                            protocol=protocol,
                                            challenge_title=CHALLENGE_TITLE,
-                                           challenge_description=CHALLENGE_DESCRIPTION))
+                                           challenge_description=CHALLENGE_DESCRIPTION,
+                                           bypass_captcha=BYPASS_CAPTCHA))
     return response
+
+
 
 @app.route("/get_captcha", methods=["GET"])
 def get_captcha():
@@ -99,6 +103,7 @@ def get_captcha():
         "captcha_id": captcha_id,
         "captcha_image": captcha_image
     })
+
 
 
 @app.route("/deploy", methods=["POST"])
@@ -131,18 +136,22 @@ def deploy_container():
             if not data:
                 logger.error("No JSON data in request")
                 return jsonify({"error": "Invalid request format. Please refresh and try again."}), 400
+            
+            # Check for captcha bypass
+            if not BYPASS_CAPTCHA:
+                captcha_id = data.get('captcha_id')
+                captcha_answer = data.get('captcha_answer')
                 
-            captcha_id = data.get('captcha_id')
-            captcha_answer = data.get('captcha_answer')
-            
-            if not captcha_id or not captcha_answer:
-                logger.error(f"Missing captcha data: id={captcha_id}, answer={captcha_answer}")
-                return jsonify({"error": "CAPTCHA verification required"}), 400
-            
-            logger.info(f"Validating captcha: id={captcha_id}, answer={captcha_answer}")
-            if not validate_captcha(captcha_id, captcha_answer):
-                logger.error(f"Incorrect captcha answer: {captcha_answer}")
-                return jsonify({"error": "Incorrect CAPTCHA answer. Please try again."}), 400
+                if not captcha_id or not captcha_answer:
+                    logger.error(f"Missing captcha data: id={captcha_id}, answer={captcha_answer}")
+                    return jsonify({"error": "CAPTCHA verification required"}), 400
+                
+                logger.info(f"Validating captcha: id={captcha_id}, answer={captcha_answer}")
+                if not validate_captcha(captcha_id, captcha_answer):
+                    logger.error(f"Incorrect captcha answer: {captcha_answer}")
+                    return jsonify({"error": "Incorrect CAPTCHA answer. Please try again."}), 400
+            else:
+                logger.info("CAPTCHA validation bypassed due to BYPASS_CAPTCHA=true")
                 
         except Exception as e:
             logger.error(f"Error parsing request data: {str(e)}")

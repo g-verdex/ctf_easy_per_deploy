@@ -107,6 +107,10 @@ CAP_CHOWN = get_env_or_fail('CAP_CHOWN', lambda x: x.lower() == 'true')
 MAX_CONTAINERS_PER_HOUR = get_env_or_fail('MAX_CONTAINERS_PER_HOUR', int)
 RATE_LIMIT_WINDOW = get_env_or_fail('RATE_LIMIT_WINDOW', int)
 
+# Testing/Debugging settings
+DEBUG_MODE = get_env_or_fail('DEBUG_MODE', lambda x: x.lower() == 'true')
+BYPASS_CAPTCHA = get_env_or_fail('BYPASS_CAPTCHA', lambda x: x.lower() == 'true')
+
 # Validation checks
 if START_RANGE >= STOP_RANGE:
     logger.error(f"START_RANGE ({START_RANGE}) must be less than STOP_RANGE ({STOP_RANGE})")

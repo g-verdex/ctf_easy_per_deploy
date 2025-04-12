@@ -28,7 +28,7 @@ services:
       - ctf_network
   
   generic_ctf_task:
-    container_name: ${COMPOSE_PROJECT_NAME}_ctf_task
+    container_name: ${COMPOSE_PROJECT_NAME}_local_stub
     build: 
       context: ./generic_ctf_task
       dockerfile: Dockerfile

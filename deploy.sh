@@ -145,6 +145,9 @@ check_required_env_vars() {
         
         # Rate limiting
         "MAX_CONTAINERS_PER_HOUR" "RATE_LIMIT_WINDOW"
+
+        # Debug option for flask_app
+        "DEBUG_MODE" "BYPASS_CAPTCHA"
     )
     
     # Check each required variable
