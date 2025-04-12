@@ -22,7 +22,8 @@ from docker_utils import (
 from config import (IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
                    CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
                    CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
-                   ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW)
+                   ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW,
+                   NETWORK_NAME)  # Added NETWORK_NAME import
 from captcha import create_captcha, validate_captcha
 
 app = Flask(__name__)
@@ -207,7 +208,9 @@ def deploy_container():
                 'cpu_period': 100000,  # Default period (100ms)
                 'cpu_quota': int(100000 * CONTAINER_CPU_LIMIT),  # Adjust quota based on CPU limit
                 'pids_limit': CONTAINER_PIDS_LIMIT,
-                'read_only': ENABLE_READ_ONLY
+                'read_only': ENABLE_READ_ONLY,
+                # FIX: Specify the network for proper isolation
+                'network': NETWORK_NAME
             }
             
             # Add capabilities if needed
