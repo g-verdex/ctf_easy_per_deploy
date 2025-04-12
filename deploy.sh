@@ -1011,7 +1011,7 @@ check_services() {
     log_info "Checking if services are running properly..."
     
     # Wait a bit for services to initialize
-    sleep 5
+    sleep 1
     
     # Check if flask_app container is running
     if $DOCKER_COMPOSE ps | grep -q flask_app.*Up; then
