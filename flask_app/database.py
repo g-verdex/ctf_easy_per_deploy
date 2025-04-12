@@ -1,7 +1,11 @@
 import sqlite3
 import os
 import time
+import logging
 from config import DB_PATH
+
+# Setup logging
+logger = logging.getLogger('ctf-deployer')
 
 # Ensure the directory exists
 def ensure_db_dir():
@@ -54,11 +58,16 @@ def remove_container_from_db(container_id):
 def record_ip_request(ip_address):
     """Records an IP address's request for rate limiting purposes"""
     try:
+        current_time = int(time.time())
+        logger.info(f"Recording request from IP {ip_address} at {current_time}")
         execute_query("INSERT INTO ip_requests (ip_address, request_time) VALUES (?, ?)", 
-                      (ip_address, int(time.time())))
+                      (ip_address, current_time))
     except sqlite3.IntegrityError:
         # If there's a primary key violation, just ignore
+        logger.warning(f"Duplicate request record for IP {ip_address} - ignored")
         pass
+    except Exception as e:
+        logger.error(f"Error recording IP request: {str(e)}")
 
 # Check if IP has exceeded request limits
 def check_ip_rate_limit(ip_address, time_window=3600, max_requests=5):
@@ -73,31 +82,58 @@ def check_ip_rate_limit(ip_address, time_window=3600, max_requests=5):
     Returns:
         Boolean: True if rate limit exceeded, False otherwise
     """
-    if not ip_address or ip_address == "127.0.0.1":
-        # Skip rate limiting for localhost
-        return False
+    try:
+        if not ip_address or ip_address == "127.0.0.1":
+            # Skip rate limiting for localhost
+            logger.info("Skipping rate limit for localhost")
+            return False
+            
+        current_time = int(time.time())
+        cutoff_time = current_time - time_window
         
-    current_time = int(time.time())
-    cutoff_time = current_time - time_window
-    
-    # Count requests from this IP in the time window
-    count = execute_query(
-        "SELECT COUNT(*) FROM ip_requests WHERE ip_address = ? AND request_time > ?", 
-        (ip_address, cutoff_time), 
-        fetchone=True
-    )[0]
-    
-    # Also count active containers from this IP
-    active_count = execute_query(
-        "SELECT COUNT(*) FROM containers WHERE ip_address = ?", 
-        (ip_address,), 
-        fetchone=True
-    )[0]
-    
-    # Clean up old records
-    execute_query("DELETE FROM ip_requests WHERE request_time <= ?", (cutoff_time,))
-    
-    return (count + active_count) >= max_requests
+        # Count requests from this IP in the time window
+        count_result = execute_query(
+            "SELECT COUNT(*) FROM ip_requests WHERE ip_address = ? AND request_time > ?", 
+            (ip_address, cutoff_time), 
+            fetchone=True
+        )
+        
+        if not count_result:
+            logger.warning(f"Failed to get count for IP {ip_address}")
+            return False
+            
+        request_count = count_result[0]
+        
+        # Also count active containers from this IP
+        active_count_result = execute_query(
+            "SELECT COUNT(*) FROM containers WHERE ip_address = ?", 
+            (ip_address,), 
+            fetchone=True
+        )
+        
+        if not active_count_result:
+            logger.warning(f"Failed to get active container count for IP {ip_address}")
+            return False
+            
+        active_count = active_count_result[0]
+        
+        total_count = request_count + active_count
+        
+        # Clean up old records
+        execute_query("DELETE FROM ip_requests WHERE request_time <= ?", (cutoff_time,))
+        
+        # Log rate limit values for debugging
+        logger.info(f"IP: {ip_address}, Recent requests: {request_count}, Active containers: {active_count}, Total: {total_count}, Limit: {max_requests}")
+        
+        # Check if limit exceeded
+        return total_count >= max_requests
+        
+    except Exception as e:
+        logger.error(f"Error checking rate limit: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # In case of error, allow the request to proceed
+        return False
 
 # Get all active containers
 def get_all_active_containers():
@@ -106,4 +142,3 @@ def get_all_active_containers():
 # Get container by user UUID
 def get_container_by_uuid(user_uuid):
     return execute_query("SELECT * FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
-

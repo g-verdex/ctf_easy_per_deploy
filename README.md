@@ -1,6 +1,6 @@
 # 🚀 CTF Challenge Deployer
 
-![Version](https://img.shields.io/badge/version-1.0-blue)
+![Version](https://img.shields.io/badge/version-1.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 A flexible, containerized solution for deploying Capture The Flag (CTF) challenges with isolated instances for each participant.
@@ -76,14 +76,14 @@ The system consists of two main components:
 
 2. Configure your environment:
    ```bash
-   # Review and modify the .env file as needed
+   # Create or modify the .env file as needed
    nano .env
    ```
 
-3. Run the deployment script:
+3. Run the deployment script with root privileges:
    ```bash
    chmod +x deploy.sh
-   ./deploy.sh
+   sudo ./deploy.sh
    ```
 
 4. Access the deployer:
@@ -93,22 +93,90 @@ The system consists of two main components:
 
 ## ⚙️ Configuration
 
-All configuration is done through the `.env` file:
+All configuration is done through the `.env` file. The system validates all required variables during startup to ensure proper operation.
 
-### Key Configuration Options
+### Complete Environment Variable Reference
 
-| Category | Variable | Description |
-|----------|----------|-------------|
-| **Time** | `LEAVE_TIME` | Container lifetime in seconds |
-| | `ADD_TIME` | Extension time in seconds |
-| **Ports** | `FLASK_APP_PORT` | Port for the deployer interface |
-| | `START_RANGE`/`STOP_RANGE` | Range for dynamic port assignment |
-| **Resources** | `CONTAINER_MEMORY_LIMIT` | Memory limit per container |
-| | `CONTAINER_CPU_LIMIT` | CPU limit per container |
-| **Security** | `ENABLE_NO_NEW_PRIVILEGES` | Prevent privilege escalation |
-| | `DROP_ALL_CAPABILITIES` | Drop all container capabilities |
+#### Container Identification
 
-For a complete list with detailed descriptions, see the comments in the `.env` file.
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `COMPOSE_PROJECT_NAME` | Name prefix for Docker containers | Yes |
+| `IMAGES_NAME` | Docker image name for the challenge | Yes |
+| `FLAG` | CTF flag value to be passed to containers | Optional* |
+
+> *Note: `FLAG` can be left as an empty string (`FLAG=""`) if you prefer to embed the flag directly in your challenge rather than passing it as an environment variable. Do not comment out this variable even if you leave it empty.
+
+#### Time Settings
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `LEAVE_TIME` | Default container lifetime in seconds (e.g., 1800 for 30 minutes) | Yes |
+| `ADD_TIME` | Additional time when extending container life in seconds (e.g., 600 for 10 minutes) | Yes |
+
+#### Port Configuration
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `PORT_IN_CONTAINER` | Port the challenge service runs on inside container | Yes |
+| `START_RANGE` | Start of port range for container mapping (e.g., 9000) | Yes |
+| `STOP_RANGE` | End of port range for container mapping (e.g., 10000) | Yes |
+| `FLASK_APP_PORT` | Port where the flask deployer app will be accessible | Yes |
+| `DIRECT_TEST_PORT` | Port for directly testing the challenge (bypassing deployer) | Yes |
+
+#### Network Configuration
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `NETWORK_NAME` | Docker network name for challenge containers | Yes |
+| `NETWORK_SUBNET` | Subnet for the Docker network (e.g., 172.28.16.0/22) | Yes |
+
+#### Database Settings
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `DB_PATH` | Path to SQLite database file (e.g., ./data/containers.db) | Yes |
+
+#### Challenge Display
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `CHALLENGE_TITLE` | Title displayed to users in the web interface | Yes |
+| `CHALLENGE_DESCRIPTION` | Challenge description shown to users | Yes |
+
+#### Resource Limits
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `CONTAINER_MEMORY_LIMIT` | Maximum memory per container (e.g., 512M) | Yes |
+| `CONTAINER_SWAP_LIMIT` | Maximum swap memory per container (e.g., 512M) | Yes |
+| `CONTAINER_CPU_LIMIT` | CPU cores allocated per container (e.g., 0.5 for half a core) | Yes |
+| `CONTAINER_PIDS_LIMIT` | Maximum process IDs per container (e.g., 100) | Yes |
+
+#### Security Options
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `ENABLE_NO_NEW_PRIVILEGES` | Prevent privilege escalation (true/false) | Yes |
+| `ENABLE_READ_ONLY` | Make container filesystem read-only (true/false) | Yes |
+| `ENABLE_TMPFS` | Enable temporary filesystem (true/false) | Yes |
+| `TMPFS_SIZE` | Size of tmpfs if enabled (e.g., 64M) | Yes |
+
+#### Container Capabilities
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `DROP_ALL_CAPABILITIES` | Whether to drop all capabilities by default (true/false) | Yes |
+| `CAP_NET_BIND_SERVICE` | Allow binding to privileged ports <1024 (true/false) | Yes |
+| `CAP_CHOWN` | Allow changing file ownership (true/false) | Yes |
+
+#### Rate Limiting
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `MAX_CONTAINERS_PER_HOUR` | Maximum containers per IP address per hour | Yes |
+| `RATE_LIMIT_WINDOW` | Rate limit time window in seconds (typically 3600) | Yes |
+
 
 ## 🔧 Creating Custom Challenges
 
@@ -117,16 +185,16 @@ To create a custom challenge:
 1. Modify the challenge in `generic_ctf_task/`:
    - Update the `Dockerfile` to build your challenge
    - Ensure your application listens on the port specified in `PORT_IN_CONTAINER`
-   - Make sure your application reads the flag from the `FLAG` environment variable
+   - Make sure your application reads the flag from the `FLAG` environment variable (or embed it directly)
 
 2. Update the `.env` file with your challenge details:
    - Set an appropriate title and description
-   - Configure the flag
+   - Configure the flag (or leave as empty string if embedded)
    - Adjust time and resource settings as needed
 
 3. Rebuild and deploy:
    ```bash
-   ./deploy.sh
+   sudo ./deploy.sh
    ```
 
 ### Example Challenge Structure
@@ -149,16 +217,44 @@ generic_ctf_task/
 
 ### Common Issues
 
-- **No available ports**: The system has reached maximum concurrent containers
-- **Rate limit exceeded**: IP has created too many instances
-- **Container fails to start**: Check Docker logs for errors
-- **Network conflicts**: The deployment script will attempt to find an available subnet
+#### Environment Variable Issues
 
-### Logs
+If you encounter errors during deployment related to missing or invalid environment variables, check the error messages from `deploy.sh` which will indicate exactly which variables need attention.
+
+#### Port Range Issues
+
+The system needs a range of available ports for container allocation. If you see errors like:
+```
+Error getting free port: name 'PORT_RANGE' is not defined
+```
+This typically means there's an issue with the port range configuration. Make sure:
+- `START_RANGE` and `STOP_RANGE` are defined in your `.env` file
+- `START_RANGE` is less than `STOP_RANGE`
+- The range doesn't conflict with other services
+
+#### Rate Limiting
+
+If users are receiving "rate limit exceeded" errors too frequently, you can adjust:
+- `MAX_CONTAINERS_PER_HOUR`: Increase this value in the `.env` file
+- `RATE_LIMIT_WINDOW`: Adjust the time window for rate limiting
+
+#### Docker Connection Issues
+
+If the system cannot connect to Docker, ensure:
+- Docker is running: `sudo systemctl status docker`
+- The Flask app container has access to the Docker socket
+- You're running `deploy.sh` with appropriate permissions (sudo)
+
+### Advanced Debugging
+
+For more detailed diagnostics:
 
 ```bash
-# View deployer logs
-docker-compose logs flask_app
+# View all container logs
+docker-compose logs -f
+
+# View just flask_app logs
+docker-compose logs -f flask_app
 
 # View logs for a specific challenge container
 docker logs [container_id]
@@ -172,7 +268,7 @@ The deployment script automatically cleans up stale networks and containers. To 
 
 ```bash
 # Stop all containers and remove networks
-docker-compose down -v
+sudo ./deploy.sh down
 
 # Remove all unused networks
 docker network prune
@@ -182,7 +278,7 @@ docker network prune
 
 ```bash
 git pull
-./deploy.sh
+sudo ./deploy.sh
 ```
 
 ## 📄 License

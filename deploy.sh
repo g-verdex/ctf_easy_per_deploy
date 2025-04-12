@@ -27,13 +27,160 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
+# Function to display usage information
+show_usage() {
+    echo -e "${BLUE}======== CTF CHALLENGE DEPLOYER ========${NC}"
+    echo -e "Usage: sudo $0 [up|down]"
+    echo -e ""
+    echo -e "Commands:"
+    echo -e "  up     Start the CTF challenge deployment service"
+    echo -e "  down   Stop all services and clean up resources"
+    echo -e ""
+    echo -e "Example:"
+    echo -e "  sudo $0 up     # Start the service"
+    echo -e "  sudo $0 down   # Stop the service"
+    exit 1
+}
+
+# Function to check for required environment variables
+check_required_env_vars() {
+    log_info "Checking required environment variables..."
+    
+    # Load .env file if it exists
+    if [ ! -f .env ]; then
+        log_error ".env file not found. Deployment cannot continue."
+        exit 1
+    fi
+    
+    # Source the .env file to get variables
+    source .env
+    
+    # Define required variables (in groups for readability)
+    # Container time settings
+    REQUIRED_VARS=(
+        # Container time settings
+        "LEAVE_TIME" "ADD_TIME"
+        
+        # Container image and identification
+        "IMAGES_NAME" "FLAG"
+        
+        # Port configuration
+        "PORT_IN_CONTAINER" "START_RANGE" "STOP_RANGE" "FLASK_APP_PORT" "DIRECT_TEST_PORT"
+        
+        # Network configuration
+        "NETWORK_NAME" "NETWORK_SUBNET"
+        
+        # Database settings
+        "DB_PATH"
+        
+        # Challenge details
+        "CHALLENGE_TITLE" "CHALLENGE_DESCRIPTION"
+        
+        # Resource limits
+        "CONTAINER_MEMORY_LIMIT" "CONTAINER_SWAP_LIMIT" "CONTAINER_CPU_LIMIT" "CONTAINER_PIDS_LIMIT"
+        
+        # Security options
+        "ENABLE_NO_NEW_PRIVILEGES" "ENABLE_READ_ONLY" "ENABLE_TMPFS" "TMPFS_SIZE"
+        
+        # Container capabilities
+        "DROP_ALL_CAPABILITIES" "CAP_NET_BIND_SERVICE" "CAP_CHOWN"
+        
+        # Rate limiting
+        "MAX_CONTAINERS_PER_HOUR" "RATE_LIMIT_WINDOW"
+    )
+    
+    # Check each required variable
+    MISSING_VARS=()
+    for var in "${REQUIRED_VARS[@]}"; do
+        # Check if variable is empty
+        if [ -z "${!var}" ]; then
+            MISSING_VARS+=("$var")
+        fi
+    done
+    
+    # If any variables are missing, print error and exit
+    if [ ${#MISSING_VARS[@]} -gt 0 ]; then
+        log_error "The following required environment variables are missing or empty:"
+        for var in "${MISSING_VARS[@]}"; do
+            log_error "  - $var"
+        done
+        log_error "Please add these variables to your .env file and try again."
+        exit 1
+    fi
+    
+    # Validate numeric values
+    if ! [[ "$START_RANGE" =~ ^[0-9]+$ ]]; then
+        log_error "START_RANGE must be a number"
+        exit 1
+    fi
+    
+    if ! [[ "$STOP_RANGE" =~ ^[0-9]+$ ]]; then
+        log_error "STOP_RANGE must be a number"
+        exit 1
+    fi
+    
+    if [ "$START_RANGE" -ge "$STOP_RANGE" ]; then
+        log_error "START_RANGE (${START_RANGE}) must be less than STOP_RANGE (${STOP_RANGE})"
+        exit 1
+    fi
+    
+    if ! [[ "$LEAVE_TIME" =~ ^[0-9]+$ ]]; then
+        log_error "LEAVE_TIME must be a number"
+        exit 1
+    fi
+    
+    if ! [[ "$ADD_TIME" =~ ^[0-9]+$ ]]; then
+        log_error "ADD_TIME must be a number"
+        exit 1
+    fi
+    
+    # Validate boolean values (convert to lowercase for comparison)
+    ENABLE_NO_NEW_PRIVILEGES_LC=$(echo "$ENABLE_NO_NEW_PRIVILEGES" | tr '[:upper:]' '[:lower:]')
+    if [[ "$ENABLE_NO_NEW_PRIVILEGES_LC" != "true" && "$ENABLE_NO_NEW_PRIVILEGES_LC" != "false" ]]; then
+        log_error "ENABLE_NO_NEW_PRIVILEGES must be 'true' or 'false'"
+        exit 1
+    fi
+    
+    ENABLE_READ_ONLY_LC=$(echo "$ENABLE_READ_ONLY" | tr '[:upper:]' '[:lower:]')
+    if [[ "$ENABLE_READ_ONLY_LC" != "true" && "$ENABLE_READ_ONLY_LC" != "false" ]]; then
+        log_error "ENABLE_READ_ONLY must be 'true' or 'false'"
+        exit 1
+    fi
+    
+    ENABLE_TMPFS_LC=$(echo "$ENABLE_TMPFS" | tr '[:upper:]' '[:lower:]')
+    if [[ "$ENABLE_TMPFS_LC" != "true" && "$ENABLE_TMPFS_LC" != "false" ]]; then
+        log_error "ENABLE_TMPFS must be 'true' or 'false'"
+        exit 1
+    fi
+    
+    DROP_ALL_CAPABILITIES_LC=$(echo "$DROP_ALL_CAPABILITIES" | tr '[:upper:]' '[:lower:]')
+    if [[ "$DROP_ALL_CAPABILITIES_LC" != "true" && "$DROP_ALL_CAPABILITIES_LC" != "false" ]]; then
+        log_error "DROP_ALL_CAPABILITIES must be 'true' or 'false'"
+        exit 1
+    fi
+    
+    CAP_NET_BIND_SERVICE_LC=$(echo "$CAP_NET_BIND_SERVICE" | tr '[:upper:]' '[:lower:]')
+    if [[ "$CAP_NET_BIND_SERVICE_LC" != "true" && "$CAP_NET_BIND_SERVICE_LC" != "false" ]]; then
+        log_error "CAP_NET_BIND_SERVICE must be 'true' or 'false'"
+        exit 1
+    fi
+    
+    CAP_CHOWN_LC=$(echo "$CAP_CHOWN" | tr '[:upper:]' '[:lower:]')
+    if [[ "$CAP_CHOWN_LC" != "true" && "$CAP_CHOWN_LC" != "false" ]]; then
+        log_error "CAP_CHOWN must be 'true' or 'false'"
+        exit 1
+    fi
+    
+    log_success "All required environment variables are set."
+}
+
 # Check if running as root
 check_root_permissions() {
     log_info "Checking for root permissions..."
     
     if [ "$(id -u)" -ne 0 ]; then
         log_error "This script must be run as root or with sudo."
-        log_error "Please run with: sudo $0"
+        log_error "Please run with: sudo $0 [up|down]"
         exit 1
     fi
     
@@ -128,7 +275,7 @@ check_existing_containers() {
     
     # Expected container names
     FLASK_APP_NAME="${COMPOSE_PROJECT_NAME}_flask_app"
-    GENERIC_TASK_NAME="${COMPOSE_PROJECT_NAME}_generic_ctf_task"
+    GENERIC_TASK_NAME="${COMPOSE_PROJECT_NAME}_ctf_task"
     
     # Check if containers exist
     EXISTING_CONTAINERS=""
@@ -137,7 +284,7 @@ check_existing_containers() {
         EXISTING_CONTAINERS="${EXISTING_CONTAINERS}${FLASK_APP_NAME}, "
     fi
     
-    if dockeps -a --format "{{.Names}}" | grep -q "^${GENERIC_TASK_NAME}$"; then
+    if docker ps -a --format "{{.Names}}" | grep -q "^${GENERIC_TASK_NAME}$"; then
         EXISTING_CONTAINERS="${EXISTING_CONTAINERS}${GENERIC_TASK_NAME}, "
     fi
     
@@ -274,52 +421,7 @@ check_port_range_conflicts() {
     log_success "Port range successfully registered."
 }
 
-# Function to check if two subnets overlap
-check_subnet_overlap() {
-    local subnet1=$1
-    local subnet2=$2
-    
-    # Extract network address and prefix for first subnet
-    local net1=$(echo $subnet1 | cut -d'/' -f1)
-    local prefix1=$(echo $subnet1 | cut -d'/' -f2)
-    
-    # Extract network address and prefix for second subnet
-    local net2=$(echo $subnet2 | cut -d'/' -f1)
-    local prefix2=$(echo $subnet2 | cut -d'/' -f2)
-    
-    # Convert IP addresses to decimal
-    local IFS='.'
-    read -r -a oct1 <<< "$net1"
-    read -r -a oct2 <<< "$net2"
-    
-    # Calculate decimal representations
-    local dec1=$(( (${oct1[0]} << 24) + (${oct1[1]} << 16) + (${oct1[2]} << 8) + ${oct1[3]} ))
-    local dec2=$(( (${oct2[0]} << 24) + (${oct2[1]} << 16) + (${oct2[2]} << 8) + ${oct2[3]} ))
-    
-    # Calculate subnet masks
-    local mask1=$(( 0xffffffff << (32 - $prefix1) & 0xffffffff ))
-    local mask2=$(( 0xffffffff << (32 - $prefix2) & 0xffffffff ))
-    
-    # Calculate network addresses
-    local net1_addr=$(( $dec1 & $mask1 ))
-    local net2_addr=$(( $dec2 & $mask2 ))
-    
-    # Calculate broadcast addresses
-    local bcast1=$(( $net1_addr | ~$mask1 & 0xffffffff ))
-    local bcast2=$(( $net2_addr | ~$mask2 & 0xffffffff ))
-    
-    # Check for overlap
-    # If start of one network is before end of another AND
-    # end of one network is after start of another
-    if [ $net1_addr -le $bcast2 ] && [ $bcast1 -ge $net2_addr ]; then
-        return 0  # Subnets overlap
-    else
-        return 1  # Subnets don't overlap
-    fi
-}
-
 # Check for network conflicts
-
 check_network_conflicts() {
     log_info "Checking for network conflicts..."
     
@@ -335,48 +437,25 @@ check_network_conflicts() {
         if docker network inspect "$NETWORK_NAME" | grep -q '"Containers": {}'; then
             log_info "Network $NETWORK_NAME has no attached containers. Will reuse."
         else
-            CONTAINERS=$(docker network inspect "$NETWORK_NAME" | grep -A 15 "Containers" | grep "Name" | cut -d'"' -f4)
+            CONTAINERS=$(docker network inspect "$NETWORK_NAME" | grep -A 5 "Containers" | grep "Name" | cut -d'"' -f4)
             log_warning "Network $NETWORK_NAME has the following containers attached:"
             echo "$CONTAINERS"
-            
-            # Instead of error, ask user if they want to delete the containers and network
-            read -p "Do you want to remove these containers and the network to continue? (y/n): " -n 1 -r
-            echo
-            
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                log_info "Removing attached containers and network..."
-                
-                # Get container IDs from the network
-
-		CONTAINER_IDS=$(docker network inspect "$NETWORK_NAME" | grep -A 65535 "Containers" |grep -v config-hash |grep -v EndpointID| grep -o '"[a-f0-9]\{64\}"' | tr -d '"')
-                # Remove each container
-                for container_id in $CONTAINER_IDS; do
-                    log_info "Removing container $container_id..."
-                    if docker rm -f "$container_id" > /dev/null; then
-                        log_success "Container removed successfully."
-                    else
-                        log_warning "Failed to remove container $container_id."
-                    fi
-                done
-                
-                # Remove the network
-                log_info "Removing network $NETWORK_NAME..."
-                if docker network rm -f "$NETWORK_NAME" > /dev/null; then
-                    log_success "Network removed successfully."
-                else
-                    log_error "Failed to remove network. Please check if all containers are properly disconnected."
-                    exit 1
-                fi
-            else
-                log_error "Deployment aborted by user. Please remove the containers manually or use a different network name."
-                exit 1
-            fi
+            log_error "Network has existing containers - cannot safely proceed."
+            exit 1
         fi
     else
         log_info "Network $NETWORK_NAME does not exist yet."
         
-        # Check for subnet conflicts with existing networks (rest of function remains unchanged)
-        # ...
+        # Check if subnet conflicts with existing networks
+        SUBNET_FIRST_OCTETS=$(echo "$NETWORK_SUBNET" | cut -d'/' -f1 | cut -d'.' -f1-2)
+        CONFLICTING_NETWORKS=$(docker network ls --format "{{.Name}}" | xargs -I{} sh -c "docker network inspect {} | grep -q \"$SUBNET_FIRST_OCTETS\" && echo {}" 2>/dev/null)
+        
+        if [ ! -z "$CONFLICTING_NETWORKS" ]; then
+            log_error "Subnet $NETWORK_SUBNET conflicts with existing networks:"
+            echo "$CONFLICTING_NETWORKS"
+            log_error "Please update your NETWORK_SUBNET in .env to avoid conflicts."
+            exit 1
+        fi
     fi
     
     log_success "Network conflict check completed."
@@ -525,7 +604,7 @@ check_ports() {
     FLASK_APP_PORT=${FLASK_APP_PORT:-6664}
     DIRECT_TEST_PORT=${DIRECT_TEST_PORT:-44444}
     
-    # Check if ports are in use
+    # Check if ports in use
     if netstat -tuln 2>/dev/null | grep -q ":$FLASK_APP_PORT " || ss -tuln 2>/dev/null | grep -q ":$FLASK_APP_PORT "; then
         log_success "Flask application port $FLASK_APP_PORT is accessible."
     else
@@ -601,47 +680,68 @@ main() {
     echo -e "${BLUE}======== CTF CHALLENGE DEPLOYER ========${NC}"
     log_info "Starting deployment process..."
     
-    # Check for down command
-    if [ "$1" = "down" ]; then
-        shutdown_services
-        exit 0
+    # Check if we have exactly one argument
+    if [ $# -ne 1 ]; then
+        log_error "Exactly one argument required: 'up' or 'down'"
+        show_usage
     fi
     
-    # Check root permissions first
+    # Check root permissions first for any operation
     check_root_permissions
     
-    # Register signal handler
-    trap cleanup SIGINT SIGTERM
-    
-    # Run deployment steps
-    check_docker
-    detect_docker_compose
-    check_env_file
-    
-    # Check for existing containers with the same name
-    check_existing_containers
-    
-    check_network_conflicts
-    check_port_conflicts
-    safely_cleanup_network
-    check_directories
-    build_images
-    start_containers
-    check_services
-    check_ports
-    print_access_info
-    print_multi_instance_tips
-    
-    # Offer to show logs
-    echo ""
-    read -p "Do you want to view container logs? (y/n): " show_logs_choice
-    if [[ "$show_logs_choice" =~ ^[Yy]$ ]]; then
-        show_logs
-    fi
-    
-    log_success "Deployment completed successfully!"
+    # Process the command based on the argument
+    case "$1" in
+        up)
+            # Register signal handler
+            trap cleanup SIGINT SIGTERM
+            
+            # Run pre-checks for all required environment variables
+            check_required_env_vars
+            
+            # Run deployment steps
+            check_docker
+            detect_docker_compose
+            check_env_file
+            
+            # Check for existing containers with the same name
+            check_existing_containers
+            
+            check_network_conflicts
+            check_port_conflicts
+            safely_cleanup_network
+            check_directories
+            build_images
+            start_containers
+            check_services
+            check_ports
+            print_access_info
+            print_multi_instance_tips
+            
+            # Offer to show logs
+            echo ""
+            read -p "Do you want to view container logs? (y/n): " show_logs_choice
+            if [[ "$show_logs_choice" =~ ^[Yy]$ ]]; then
+                show_logs
+            fi
+            
+            log_success "Deployment completed successfully!"
+            ;;
+            
+        down)
+            # Initialize Docker compose before shutdown
+            check_docker
+            detect_docker_compose
+            
+            # Now shutdown services
+            shutdown_services
+            ;;
+            
+        *)
+            log_error "Invalid argument: $1"
+            show_usage
+            ;;
+    esac
 }
 
 # Execute main function with all arguments
-main "$@"r
- 
+main "$@"
