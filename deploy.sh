@@ -14,6 +14,9 @@ LOCK_DIR="/var/lock/ctf_deployer"
 COMMAND=""
 VERBOSE_MODE=false
 
+# List of browser restricted ports
+BAD_PORTS=(1 7 9 11 13 15 17 19 20 21 22 23 25 37 42 43 53 69 77 79 87 95 101 102 103 104 109 110 111 113 115 117 119 123 135 137 139 143 161 179 389 427 465 512 513 514 515 526 530 531 532 540 548 554 556 563 587 601 636 989 990 993 995 1719 1720 1723 2049 3659 4045 4190 5060 5061 6000 6566 6665 6666 6667 6668 6669 6679 6697 10080)
+
 # Print styled messages based on level
 log_info() {
     if [ "$VERBOSE_MODE" = true ]; then
@@ -316,6 +319,74 @@ check_env_file() {
         exit 1
     else
         log_success "All required environment variables are set."
+    fi
+}
+
+# Check if a port is a well-known service port
+is_bad_port() {
+    local port=$1
+    for bad_port in "${BAD_PORTS[@]}"; do
+        if [ "$port" -eq "$bad_port" ]; then
+            return 0  # True, it is a bad port
+        fi
+    done
+    return 1  # False, it's not a bad port
+}
+
+check_port_range_for_bad_ports() {
+    log_info "Checking port range for well-known service ports..."
+    
+    local start_range=$1
+    local stop_range=$2
+    local bad_ports_found=()
+    local critical_error=false
+    
+    # Check the Flask app port
+    if is_bad_port "$FLASK_APP_PORT"; then
+        log_error "CRITICAL: FLASK_APP_PORT ($FLASK_APP_PORT) is a well-known service port"
+        critical_error=true
+    fi
+    
+    # Check the direct test port
+    if is_bad_port "$DIRECT_TEST_PORT"; then
+        log_error "CRITICAL: DIRECT_TEST_PORT ($DIRECT_TEST_PORT) is a well-known service port"
+        critical_error=true
+    fi
+    
+    # Check the container's internal port
+    if is_bad_port "$PORT_IN_CONTAINER"; then
+        log_error "CRITICAL: PORT_IN_CONTAINER ($PORT_IN_CONTAINER) is a well-known service port"
+        critical_error=true
+    fi
+    
+    # Check each port in the range (using sampling for efficiency)
+    local step=$((($stop_range - $start_range) / 100))
+    step=$((step > 0 ? step : 1))  # Ensure step is at least 1
+    
+    for ((port=start_range; port<stop_range; port+=step)); do
+        if is_bad_port "$port"; then
+            bad_ports_found+=($port)
+            # If we found 10+ bad ports, stop checking to avoid a huge list
+            if [ ${#bad_ports_found[@]} -ge 10 ]; then
+                bad_ports_found+=("...")
+                break
+            fi
+        fi
+    done
+    
+    if [ ${#bad_ports_found[@]} -gt 0 ]; then
+        log_error "CRITICAL: Your port range ($start_range-$stop_range) includes well-known service ports:"
+        log_error "${bad_ports_found[*]}"
+        critical_error=true
+    fi
+    
+    if [ "$critical_error" = true ]; then
+        log_error "Deployment aborted due to well-known service ports in configuration."
+        log_error "Please modify your .env file to avoid using these ports."
+        log_error "These ports are commonly used by system services and can cause conflicts."
+        exit 1
+    else
+        log_success "Port validation successful: No well-known service ports found."
     fi
 }
 
@@ -898,6 +969,7 @@ main() {
             
            # Run pre-checks for all required environment variables
             check_required_env_vars
+            check_port_range_for_bad_ports "$START_RANGE" "$STOP_RANGE"
             clean_data_directory
             
             # Run deployment steps
