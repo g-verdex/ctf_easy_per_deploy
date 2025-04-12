@@ -1,5 +1,5 @@
 from routes import app
-from database import init_db, execute_query
+from database import init_db, init_db_pool, execute_query
 import docker
 import signal
 import sys
@@ -44,7 +44,11 @@ signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == "__main__":
-    init_db()  # Initialize the database
+    # Initialize the database connection pool
+    init_db_pool()
+    
+    # Initialize the database schema
+    init_db()
     
     # Get debug mode from environment variable
     debug_mode = os.environ.get('DEBUG_MODE', '').lower() == 'true'

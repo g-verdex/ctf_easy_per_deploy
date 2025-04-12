@@ -101,7 +101,8 @@ def remove_container(container_id, port):
     # Always remove port from used_ports set and from database regardless of removal status
     used_ports.discard(port)
     try:
-        execute_query("DELETE FROM containers WHERE id = ?", (container_id,))
+        # Use execute_insert here to avoid trying to fetch results
+        remove_container_from_db(container_id)
         logger.info(f"Container {container_id} removed from database.")
     except Exception as e:
         logger.error(f"Failed to remove container {container_id} from database: {str(e)}")
@@ -110,7 +111,7 @@ def remove_container(container_id, port):
 def auto_remove_container(container_id, port):
     try:
         while True:
-            container_data = execute_query("SELECT expiration_time FROM containers WHERE id = ?", (container_id,), fetchone=True)
+            container_data = execute_query("SELECT expiration_time FROM containers WHERE id = %s", (container_id,), fetchone=True)
             if not container_data:
                 logger.info(f"Container {container_id} not found in database. Stopping thread.")
                 return  # Exit the thread

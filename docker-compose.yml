@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ctf_network
+
   flask_app:
     container_name: ${COMPOSE_PROJECT_NAME}_flask_app
     build: ./flask_app
@@ -13,7 +29,10 @@ services:
     restart: unless-stopped
     stop_signal: SIGINT
     depends_on:
-      - generic_ctf_task
+      postgres:
+        condition: service_healthy
+      generic_ctf_task:
+        condition: service_started
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -55,3 +74,6 @@ networks:
     ipam:
       config:
         - subnet: ${NETWORK_SUBNET}
+
+volumes:
+  postgres_data:

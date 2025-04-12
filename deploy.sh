@@ -132,7 +132,7 @@ check_required_env_vars() {
         "NETWORK_NAME" "NETWORK_SUBNET"
         
         # Database settings
-        "DB_PATH"
+        "DB_HOST" "DB_PORT" "DB_NAME" "DB_USER" "DB_PASSWORD"
         
         # Challenge details
         "CHALLENGE_TITLE" "CHALLENGE_DESCRIPTION"
@@ -474,6 +474,7 @@ check_image_name_convention() {
 }
 
 # Check for existing containers with the same name
+# Updated check_existing_containers function to also check for PostgreSQL container
 check_existing_containers() {
     log_info "Checking for existing containers..."
     
@@ -491,6 +492,8 @@ check_existing_containers() {
     # Expected container names
     FLASK_APP_NAME="${COMPOSE_PROJECT_NAME}_flask_app"
     GENERIC_TASK_NAME="${COMPOSE_PROJECT_NAME}_local_stub"
+    # PostgreSQL container follows Docker Compose's naming convention (with hyphen)
+    POSTGRES_NAME="${COMPOSE_PROJECT_NAME}-postgres-1"
     
     # Check if containers exist
     EXISTING_CONTAINERS=""
@@ -501,6 +504,10 @@ check_existing_containers() {
     
     if docker ps -a --format "{{.Names}}" | grep -q "^${GENERIC_TASK_NAME}$"; then
         EXISTING_CONTAINERS="${EXISTING_CONTAINERS}${GENERIC_TASK_NAME}, "
+    fi
+    
+    if docker ps -a --format "{{.Names}}" | grep -q "^${POSTGRES_NAME}$"; then
+        EXISTING_CONTAINERS="${EXISTING_CONTAINERS}${POSTGRES_NAME}, "
     fi
     
     # Remove trailing comma and space
@@ -528,6 +535,11 @@ check_existing_containers() {
         if docker ps -a --format "{{.Names}}" | grep -q "^${GENERIC_TASK_NAME}$"; then
             docker rm -f "${GENERIC_TASK_NAME}" > /dev/null
             log_success "Removed container ${GENERIC_TASK_NAME}"
+        fi
+        
+        if docker ps -a --format "{{.Names}}" | grep -q "^${POSTGRES_NAME}$"; then
+            docker rm -f "${POSTGRES_NAME}" > /dev/null
+            log_success "Removed container ${POSTGRES_NAME}"
         fi
     else
         log_success "No existing containers found with the same name."
@@ -833,27 +845,90 @@ check_port_conflicts() {
     log_success "No obvious port conflicts detected."
 }
 
-clean_data_directory() {
-    log_info "Cleaning data directory..."
+check_database_configuration() {
+    log_info "Checking PostgreSQL configuration..."
     
-    # Get DB_PATH from .env if not already sourced
-    if [ -z "$DB_PATH" ]; then
+    # Source .env file to get database variables
+    if [ -f .env ]; then
+        source .env
+    else
+        log_error ".env file not found. Cannot check database configuration."
+        return 1
+    fi
+    
+    # Check if DB_PORT is specified and is a valid number
+    if [ -z "$DB_PORT" ]; then
+        log_warning "DB_PORT is not defined in .env file. Using default PostgreSQL port."
+    elif ! [[ "$DB_PORT" =~ ^[0-9]+$ ]]; then
+        log_error "DB_PORT must be a number. Found: $DB_PORT"
+        return 1
+    fi
+    
+    # Check if DB_HOST is specified
+    if [ -z "$DB_HOST" ]; then
+        log_warning "DB_HOST is not defined in .env file. Database connection may fail."
+    fi
+    
+    # Check if DB_NAME is specified
+    if [ -z "$DB_NAME" ]; then
+        log_warning "DB_NAME is not defined in .env file. Database connection may fail."
+    fi
+    
+    # Check if DB_USER is specified
+    if [ -z "$DB_USER" ]; then
+        log_warning "DB_USER is not defined in .env file. Database connection may fail."
+    fi
+    
+    # Check if DB_PASSWORD is empty or too simple
+    if [ -z "$DB_PASSWORD" ]; then
+        log_warning "DB_PASSWORD is not defined in .env file. Database connection may fail."
+    elif [ "$DB_PASSWORD" = "secure_password" ] || [ "$DB_PASSWORD" = "postgres" ] || [ "$DB_PASSWORD" = "password" ]; then
+        log_warning "You're using a common default password for PostgreSQL."
+        log_warning "It's recommended to change DB_PASSWORD in your .env file to a secure value."
+    fi
+    
+    log_success "Database configuration check completed."
+}
+
+# Enhanced port conflict detection (to be added to the existing check_port_conflicts function)
+check_db_port_conflict() {
+    log_info "Checking database port conflicts..."
+    
+    # Make sure .env is sourced
+    if [ -z "$DB_PORT" ]; then
         source .env
     fi
     
-    # Check if data directory exists
-    if [ ! -d "$(dirname "$DB_PATH")" ]; then
-        log_info "Data directory doesn't exist yet. Nothing to clean."
-        return
+    # Skip check if DB_PORT is not defined or not a number
+    if [ -z "$DB_PORT" ] || ! [[ "$DB_PORT" =~ ^[0-9]+$ ]]; then
+        log_warning "Skipping database port conflict check due to invalid DB_PORT: $DB_PORT"
+        return 0
     fi
     
-    # Remove the containers database if it exists
-    if [ -f "$DB_PATH" ]; then
-        log_info "Removing containers database at $DB_PATH"
-        rm -f "$DB_PATH"
-        log_success "Containers database cleaned."
+    # Check if the port is already in use
+    if netstat -tuln 2>/dev/null | grep -q ":$DB_PORT " || ss -tuln 2>/dev/null | grep -q ":$DB_PORT "; then
+        # Check if it's a PostgreSQL service
+        if netstat -tuln 2>/dev/null | grep -q ":$DB_PORT " | grep -i postgres || ss -tuln 2>/dev/null | grep -q ":$DB_PORT " | grep -i postgres; then
+            log_warning "PostgreSQL is already running on port $DB_PORT."
+            log_warning "This might be expected if you're using a shared PostgreSQL server."
+            log_warning "If this is a different PostgreSQL instance, consider changing DB_PORT in your .env file."
+        else
+            log_warning "Port $DB_PORT (configured as DB_PORT) is in use by a non-PostgreSQL service."
+            log_warning "This may cause conflicts with the PostgreSQL container."
+            log_warning "Consider changing DB_PORT in your .env file."
+        fi
     else
-        log_info "No containers database found at $DB_PATH"
+        log_success "Database port $DB_PORT is available."
+    fi
+}
+
+clean_data_directory() {
+    log_info "Cleaning data directory..."
+    
+    # Check if data directory exists
+    if [ ! -d "data" ]; then
+        log_info "Data directory doesn't exist yet. Nothing to clean."
+        return
     fi
     
     # Clean up any lock files in the data directory
@@ -1066,7 +1141,8 @@ main() {
             check_network_conflicts
             check_subnet_conflicts
             check_port_conflicts
-            
+            check_database_configuration
+            check_db_port_conflict
             # Clean the containers database
             
             # Continue with deployment

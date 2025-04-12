@@ -6,7 +6,10 @@ import docker
 import logging
 import os
 from datetime import datetime
-from database import execute_query, record_ip_request, check_ip_rate_limit, get_container_by_uuid
+from database import (
+    execute_query, record_ip_request, check_ip_rate_limit, 
+    get_container_by_uuid, store_container, remove_container_from_db
+)
 from docker_utils import (
     # Explicitly import PORT_RANGE
     PORT_RANGE,
@@ -270,12 +273,12 @@ def deploy_container():
 
         try:
             # Record this IP request
-            record_ip_request(remote_ip)
+            if not record_ip_request(remote_ip):
+                logger.warning(f"Failed to record IP request for {remote_ip}")
             
-            execute_query(
-                "INSERT INTO containers (id, port, start_time, expiration_time, user_uuid, ip_address) VALUES (?, ?, ?, ?, ?, ?)",
-                (container.id, port, int(time.time()), expiration_time, user_uuid, remote_ip)
-            )
+            # Store container in database using the new function
+            if not store_container(container.id, port, user_uuid, remote_ip, expiration_time):
+                raise Exception("Failed to store container in database")
 
             threading.Thread(target=auto_remove_container, args=(container.id, port)).start()
         except Exception as e:
@@ -306,7 +309,7 @@ def stop_container():
         return jsonify({"error": "Session error. Please refresh the page."}), 400
 
     try:
-        container_data = execute_query("SELECT id, port FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
+        container_data = execute_query("SELECT id, port FROM containers WHERE user_uuid = %s", (user_uuid,), fetchone=True)
         if not container_data:
             return jsonify({"error": "No active container"}), 400
 
@@ -326,7 +329,7 @@ def restart_container():
         return jsonify({"error": "Session error. Please refresh the page."}), 400
 
     try:
-        container_data = execute_query("SELECT id FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
+        container_data = execute_query("SELECT id FROM containers WHERE user_uuid = %s", (user_uuid,), fetchone=True)
         if not container_data:
             return jsonify({"error": "No active container"}), 400
         
@@ -349,7 +352,7 @@ def extend_container_lifetime():
         return jsonify({"error": "Session error. Please refresh the page."}), 400
 
     try:
-        container_data = execute_query("SELECT id, expiration_time FROM containers WHERE user_uuid = ?", (user_uuid,), fetchone=True)
+        container_data = execute_query("SELECT id, expiration_time FROM containers WHERE user_uuid = %s", (user_uuid,), fetchone=True)
         if not container_data:
             return jsonify({"error": "No active container"}), 400
             
@@ -358,9 +361,9 @@ def extend_container_lifetime():
         # Increase container lifetime by ADD_TIME
         new_expiration_time = expiration_time + ADD_TIME
         
-        # Update lifetime in database
+        # Update lifetime in database - use execute_insert
         execute_query(
-            "UPDATE containers SET expiration_time = ? WHERE id = ?", 
+            "UPDATE containers SET expiration_time = %s WHERE id = %s", 
             (new_expiration_time, container_id)
         )
         

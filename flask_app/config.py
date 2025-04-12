@@ -80,7 +80,11 @@ NETWORK_NAME = get_env_or_fail('NETWORK_NAME')
 NETWORK_SUBNET = get_env_or_fail('NETWORK_SUBNET')
 
 # Database settings
-DB_PATH = get_env_or_fail('DB_PATH')
+DB_HOST = get_env_or_fail('DB_HOST')
+DB_PORT = get_env_or_fail('DB_PORT', int)
+DB_NAME = get_env_or_fail('DB_NAME')
+DB_USER = get_env_or_fail('DB_USER')
+DB_PASSWORD = get_env_or_fail('DB_PASSWORD')
 
 # Challenge details
 CHALLENGE_TITLE = get_env_or_fail('CHALLENGE_TITLE')
