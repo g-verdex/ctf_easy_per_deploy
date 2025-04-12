@@ -390,6 +390,89 @@ check_port_range_for_bad_ports() {
     fi
 }
 
+# Function to check for image name conflicts
+check_image_name_conflicts() {
+    log_info "Checking for image name conflicts..."
+    
+    # Ensure .env is sourced
+    if [ -z "$IMAGES_NAME" ] || [ -z "$COMPOSE_PROJECT_NAME" ]; then
+        source .env
+    fi
+    
+    if [ -z "$IMAGES_NAME" ]; then
+        log_warning "IMAGES_NAME not set in .env file. Skipping image name conflict check."
+        return
+    fi
+    
+    # Check if the image already exists
+    if docker image inspect "$IMAGES_NAME" &>/dev/null; then
+        log_info "Image $IMAGES_NAME exists. Checking usage..."
+        
+        # Get all containers using this image
+        CONTAINERS=$(docker ps -a --filter "ancestor=$IMAGES_NAME" --format "{{.Names}}")
+        
+        if [ -n "$CONTAINERS" ]; then
+            # Filter containers that don't belong to our project
+            OTHER_PROJECT_CONTAINERS=""
+            for container in $CONTAINERS; do
+                if [[ "$container" != "${COMPOSE_PROJECT_NAME}"* ]]; then
+                    OTHER_PROJECT_CONTAINERS="$OTHER_PROJECT_CONTAINERS $container"
+                fi
+            done
+            
+            if [ -n "$OTHER_PROJECT_CONTAINERS" ]; then
+                log_warning "WARNING: Image name conflict detected!"
+                log_warning "Image $IMAGES_NAME is already in use by containers from other projects:"
+                log_warning "$OTHER_PROJECT_CONTAINERS"
+                log_warning "This may cause conflicts if you continue. The image might be overwritten, affecting other deployments."
+                log_warning "RECOMMENDATION: Change the IMAGES_NAME value in your .env file to a unique name."
+                log_warning "Suggested format: localhost/${COMPOSE_PROJECT_NAME}:latest"
+                
+                read -p "Do you want to continue anyway? This might break other deployments. (y/n): " -n 1 -r
+                echo
+                
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    log_error "Deployment aborted by user due to image name conflict."
+                    exit 1
+                fi
+                
+                log_warning "Continuing despite potential conflicts..."
+            fi
+        else
+            log_info "Image exists but is not used by any containers. Proceeding with build."
+        fi
+    else
+        log_info "No existing image named $IMAGES_NAME found. Proceeding with build."
+    fi
+    
+    log_success "Image name conflict check completed."
+}
+
+# Enhancement to the existing check_required_env_vars function
+check_image_name_convention() {
+    log_info "Checking image naming convention..."
+    
+    # Check for recommended image naming pattern
+    if [[ "$IMAGES_NAME" == *"generic_ctf_task"* ]]; then
+        log_warning "Your IMAGES_NAME is set to a generic value: $IMAGES_NAME"
+        log_warning "It's recommended to use a unique name specific to your challenge to avoid conflicts."
+        log_warning "Suggested format: localhost/${COMPOSE_PROJECT_NAME}:latest"
+        
+        read -p "Do you want to update IMAGES_NAME to recommended value localhost/${COMPOSE_PROJECT_NAME}:latest? (y/n): " -n 1 -r
+        echo
+        
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            # Update .env file
+            sed -i "s|IMAGES_NAME=.*|IMAGES_NAME=localhost/${COMPOSE_PROJECT_NAME}:latest  # Updated to unique value for this challenge|" .env
+            log_success "Updated IMAGES_NAME in .env file."
+            # Re-source .env to get the updated value
+            source .env
+        else
+            log_warning "Continuing with generic IMAGES_NAME. This might cause conflicts with other deployments."
+        fi
+    fi
+}
+
 # Check for existing containers with the same name
 check_existing_containers() {
     log_info "Checking for existing containers..."
@@ -969,7 +1052,9 @@ main() {
             
            # Run pre-checks for all required environment variables
             check_required_env_vars
+            check_image_name_convention
             check_port_range_for_bad_ports "$START_RANGE" "$STOP_RANGE"
+            check_image_name_conflicts
             clean_data_directory
             
             # Run deployment steps
