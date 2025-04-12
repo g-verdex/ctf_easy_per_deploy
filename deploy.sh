@@ -898,13 +898,13 @@ main() {
             
            # Run pre-checks for all required environment variables
             check_required_env_vars
+            clean_data_directory
             
             # Run deployment steps
             check_docker
             detect_docker_compose
             check_env_file
             check_existing_containers
-            clean_data_directory
             # Important: First check network/port conflicts to validate lock files
             check_network_conflicts
             check_subnet_conflicts
