@@ -1,79 +1,63 @@
-# CTF Deployer: Security, Scalability, and Performance Assessment
+# CTF Deployer: Post-Migration Security, Scalability, and Performance Assessment
 
 ## Executive Summary
 
-This document provides a comprehensive analysis of the CTF Deployer codebase, identifying vulnerabilities, scalability issues, and performance bottlenecks that could impact system stability under high load. The assessment covers database architecture, concurrency handling, resource management, security concerns, and observability gaps, with prioritized recommendations for improvements.
+This document provides an updated analysis of the CTF Deployer codebase following the migration from SQLite to PostgreSQL. While this migration has resolved the critical database concurrency issues, several areas still require attention to ensure optimal performance, security, and reliability under high load conditions. The assessment covers thread management, resource monitoring, security concerns, and observability gaps, with prioritized recommendations for improvements.
 
-## 1. Database-Related Issues
+## 1. Database Architecture Improvements
 
-### 1.1 SQLite Concurrency Limitations
+### 1.1 PostgreSQL Implementation with Connection Pooling
 
-**Issue**: SQLite is designed for single-writer access and has limited concurrency support, which creates bottlenecks under high load.
+**Before**: SQLite was limited by single-writer access, creating severe bottlenecks under high load.
 
-**Vulnerable Code**:
+**After**: PostgreSQL with connection pooling now provides:
+- Better concurrency handling with multiple simultaneous transactions
+- Resilience through automatic connection management
+- Transaction isolation to prevent data corruption
+
+**Implemented Code**:
 ```python
-def execute_query(query, params=(), fetchone=False):
-    ensure_db_dir()
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute(query, params)
-        conn.commit()
-        return c.fetchone() if fetchone else c.fetchall()
+# Connection pooling implementation
+pg_pool = pool.ThreadedConnectionPool(
+    5,  # Minimum connections
+    20, # Maximum connections
+    host=DB_HOST,
+    port=DB_PORT,
+    dbname=DB_NAME,
+    user=DB_USER,
+    password=DB_PASSWORD
+)
 ```
 
-**Impact**:
-- Database lock errors under concurrent write operations
-- Failed container deployments during peak usage
-- Potential database corruption if multiple processes attempt writes
+**Remaining Concerns**:
+- Connection pool exhaustion under extreme load conditions
+- No monitoring of pool health or connection utilization
 
-**Recommendation**:
-- Migrate to PostgreSQL (see Section 9)
-- Implement proper connection pooling and transaction management
-- Add retry logic with exponential backoff for transient database errors
+### 1.2 Improved Error Handling
 
-### 1.2 Lack of Database Migration Support
+**Before**: No structured error handling for database operations.
 
-**Issue**: No structured database schema management or migration system exists, making updates risky.
-
-**Impact**:
-- Difficult to update schema without data loss
-- No version tracking for database changes
-- Manual intervention required during upgrades
-
-**Recommendation**:
-- Implement database migration framework (e.g., Alembic)
-- Document schema changes and versioning
-- Add schema version check during startup
-
-### 1.3 Inefficient IP Rate Limiting Implementation
-
-**Issue**: Rate limiting implementation performs full table scans and doesn't use efficient indexing.
-
-**Vulnerable Code**:
+**After**: Added type-specific error handling with retries:
 ```python
-def check_ip_rate_limit(ip_address, time_window=3600, max_requests=5):
-    # ...
-    count_result = execute_query(
-        "SELECT COUNT(*) FROM ip_requests WHERE ip_address = ? AND request_time > ?", 
-        (ip_address, cutoff_time), 
-        fetchone=True
-    )
+def execute_query(query, params=(), fetchone=False, max_retries=3):
+    while retry_count <= max_retries:
+        try:
+            # Query execution
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            # Exponential backoff retry logic
+        except Exception as e:
+            # General error handling
 ```
 
-**Impact**:
-- Performance degradation under high traffic
-- Rate limiting may become ineffective under load
+**Remaining Concerns**:
+- No centralized logging of database errors for analysis
+- Limited metrics on query performance and failure rates
 
-**Recommendation**:
-- Add proper indexes to the ip_requests table
-- Consider in-memory caching for active rate limits
-- Implement more efficient rate limiting algorithm (e.g., sliding window with Redis)
-
-## 2. Concurrency and Threading Issues
+## 2. Concurrency and Threading Issues (Unchanged)
 
 ### 2.1 Unbounded Thread Creation
 
-**Issue**: Each container gets a dedicated monitoring thread with no limit on total thread count.
+**Issue**: Each container still gets a dedicated monitoring thread with no limit on total thread count.
 
 **Vulnerable Code**:
 ```python
@@ -93,7 +77,7 @@ threading.Thread(target=auto_remove_container, args=(container.id, port)).start(
 
 ### 2.2 Port Allocation Race Conditions
 
-**Issue**: The port allocation mechanism uses a simple in-memory set that isn't synchronized across processes.
+**Issue**: The port allocation mechanism still uses a simple in-memory set that isn't synchronized across processes.
 
 **Vulnerable Code**:
 ```python
@@ -117,41 +101,14 @@ def get_free_port():
 
 **Recommendation**:
 - Use atomic operations for port allocation
-- Implement distributed locking for port allocation
-- Store port allocation state in a shared database or Redis
+- Store port allocation state in PostgreSQL with proper locking
+- Implement retry logic for failed port allocations
 
-### 2.3 No Graceful Thread Termination
-
-**Issue**: No controlled shutdown for monitoring threads when the application terminates.
-
-**Impact**:
-- Zombie threads during application restart
-- Resource leaks
-
-**Recommendation**:
-- Implement proper thread lifecycle management
-- Add graceful termination signals to monitoring threads
-- Use daemon threads with appropriate cleanup handlers
-
-## 3. Resource Management Weaknesses
+## 3. Resource Management Weaknesses (Unchanged)
 
 ### 3.1 No Global Resource Quotas
 
 **Issue**: Resource limits exist per container but not globally across the entire deployment.
-
-**Vulnerable Code**:
-```python
-# In routes.py - Container configuration
-container_config = {
-    # ...
-    'mem_limit': CONTAINER_MEMORY_LIMIT,
-    'memswap_limit': CONTAINER_SWAP_LIMIT,
-    'cpu_period': 100000,
-    'cpu_quota': int(100000 * CONTAINER_CPU_LIMIT),
-    'pids_limit': CONTAINER_PIDS_LIMIT,
-    # ...
-}
-```
 
 **Impact**:
 - System-wide resource exhaustion
@@ -177,58 +134,26 @@ container_config = {
 - Add alerts for resource threshold violations
 - Create a dashboard for system health monitoring
 
-### 3.3 Lock File Management Issues
+## 4. Error Handling and Recovery (Improved but Incomplete)
 
-**Issue**: Port range lock files may become stale if deployments crash unexpectedly.
+### 4.1 Database Error Handling
 
-**Vulnerable Code**:
+**Before**: Inconsistent error handling for database operations.
+
+**After**: Added structured error handling with type-specific responses:
 ```python
-# In deploy.sh - Lock file creation
-echo "PORT_RANGE=${START_RANGE}-${STOP_RANGE}" > "$THIS_LOCK_FILE"
-echo "PATH=$(realpath "$(pwd)")" >> "$THIS_LOCK_FILE"
-echo "TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$THIS_LOCK_FILE"
-echo "INSTANCE_ID=${INSTANCE_ID}" >> "$THIS_LOCK_FILE"
-```
-
-**Impact**:
-- Orphaned lock files preventing resource allocation
-- Manual intervention required to clean up stale locks
-- Potential resource leaks over time
-
-**Recommendation**:
-- Add lock file expiration and periodic validation
-- Implement heartbeat mechanism for active deployments
-- Create an automatic cleanup job for stale lock files
-
-## 4. Error Handling and Recovery
-
-### 4.1 Inconsistent Error Handling
-
-**Issue**: Error handling is inconsistent across the codebase, with some operations missing proper error handling.
-
-**Vulnerable Code**:
-```python
-# Inconsistent error handling
 try:
-    container.remove(force=True)
-    logger.info(f"Container {container_id} removed.")
-except docker.errors.NotFound:
-    logger.warning(f"Container {container_id} not found in Docker, but still in database.")
+    execute_query("...")
 except Exception as e:
-    logger.error(f"Failed to remove container {container_id}: {str(e)}")
+    logger.error(f"Error recording container in database: {str(e)}")
+    # Cleanup logic
 ```
 
-**Impact**:
-- Partial operations leading to inconsistent state
-- Orphaned resources requiring manual cleanup
-- Poor user experience when errors occur
+**Remaining Concerns**:
+- Still lacks comprehensive transaction-like semantics for multi-step operations
+- No standardized recovery procedures for partial failures
 
-**Recommendation**:
-- Implement consistent error handling patterns
-- Add transaction-like semantics for multi-step operations
-- Improve error reporting and recovery procedures
-
-### 4.2 Inadequate Cleanup on Failure
+### 4.2 Inadequate Cleanup on Failure (Unchanged)
 
 **Issue**: When container deployments fail, cleanup operations are often incomplete.
 
@@ -242,23 +167,9 @@ except Exception as e:
 - Add periodic reconciliation jobs to detect and clean orphaned resources
 - Improve logging for cleanup operations
 
-### 4.3 No Health Check Endpoint
+## 5. Security Concerns (Partially Addressed)
 
-**Issue**: No proper health check API for monitoring system status.
-
-**Impact**:
-- Difficult to integrate with external monitoring
-- No easy way to verify system health
-- Manual intervention required to check status
-
-**Recommendation**:
-- Add comprehensive health check endpoints
-- Implement readiness and liveness probes
-- Expose key metrics via standard monitoring interfaces
-
-## 5. Security Concerns
-
-### 5.1 Limited Container Isolation
+### 5.1 Limited Container Isolation (Unchanged)
 
 **Issue**: Container security options are configurable but default to less secure settings.
 
@@ -280,48 +191,22 @@ DROP_ALL_CAPABILITIES=false
 - Implement security profiles for different challenge types
 - Add container security monitoring
 
-### 5.2 Insufficient Input Validation
+### 5.2 Database Security (Improved)
 
-**Issue**: Several user inputs lack proper validation before being used in critical operations.
+**Before**: SQLite had limited access controls.
 
-**Impact**:
-- Potential injection vulnerabilities
-- Unexpected behavior with malformed inputs
-- Security risks in CTF environment
+**After**: PostgreSQL provides better authentication and access control.
 
-**Recommendation**:
-- Implement comprehensive input validation
-- Use parameterized queries for all database operations
-- Add request validation middleware
+**Remaining Concerns**:
+- Default PostgreSQL password in .env file
+- No automatic rotation of database credentials
+- Credentials stored in plain text environment variables
 
-### 5.3 Limited Rate Limiting Scope
-
-**Issue**: Rate limiting only considers container creation, not other potentially expensive operations.
-
-**Impact**:
-- Vulnerability to API abuse
-- Resource exhaustion through repeated API calls
-- Denial of service risks
-
-**Recommendation**:
-- Expand rate limiting to all expensive operations
-- Implement tiered rate limits based on operation cost
-- Add IP-based throttling for suspicious activity
-
-## 6. Docker API Interaction Issues
+## 6. Docker API Interaction Issues (Unchanged)
 
 ### 6.1 No Backoff for Docker API Calls
 
 **Issue**: Repeated Docker API calls without backoff or circuit breaking.
-
-**Vulnerable Code**:
-```python
-# Polling container status without proper backoff
-while True:
-    container_data = execute_query("SELECT expiration_time FROM containers WHERE id = ?", (container_id,), fetchone=True)
-    # ...
-    time.sleep(min(time_to_wait, 30))  # Fixed sleep, no backoff
-```
 
 **Impact**:
 - Docker daemon overload during high activity
@@ -353,230 +238,188 @@ volumes:
 - Implement a more secure container orchestration model
 - Reduce scope of Docker API access
 
-## 7. Observability Gaps
+## 7. Observability Gaps (Partially Addressed)
 
-### 7.1 Limited Logging
+### 7.1 Enhanced Logging (Improved)
 
-**Issue**: Logging is basic and lacks structured format or centralized collection.
+**Before**: Basic logging without structured format.
 
-**Impact**:
-- Difficult to troubleshoot issues across deployments
-- No correlation between related log events
-- Limited visibility into system behavior
+**After**: Better logging with more context for database operations.
 
-**Recommendation**:
-- Implement structured logging
-- Add request IDs for correlation
-- Set up centralized log collection
+**Remaining Concerns**:
+- No standardized logging format for easy parsing
+- Missing correlation IDs between related operations
+- No centralized log collection and analysis
 
-### 7.2 No Performance Metrics
+### 7.2 No Database Performance Metrics (New)
 
-**Issue**: No systematic collection of performance metrics.
+**Issue**: No collection of database performance metrics or connection pool status.
 
 **Impact**:
-- No data for performance optimization
-- Hard to identify bottlenecks
-- Difficult capacity planning
+- Difficult to identify database bottlenecks
+- No visibility into connection pool utilization
+- Cannot predict or prevent database-related failures
 
 **Recommendation**:
-- Add performance metrics collection
-- Implement monitoring for key operations
-- Create dashboards for system performance
+- Add database performance metric collection
+- Monitor connection pool utilization
+- Implement slow query logging and analysis
 
-### 7.3 Missing Audit Trail
+## 8. Deployment Enhancements (Improved)
 
-**Issue**: No comprehensive audit logging for security-relevant actions.
+### 8.1 PostgreSQL-Aware Deployment (New)
 
-**Impact**:
-- Difficult to investigate security incidents
-- No visibility into user actions
-- Limited accountability
+**Before**: Deployment process only considered SQLite file.
 
-**Recommendation**:
-- Implement audit logging for all significant actions
-- Create secure storage for audit logs
-- Add tools for log analysis and reporting
-
-## 8. Web Interface Limitations
-
-### 8.1 No Authentication for Admin Functions
-
-**Issue**: No proper authentication system for administrative operations.
-
-**Impact**:
-- Unauthorized access to admin functions
-- No user-specific permissions
-- Security vulnerabilities
-
-**Recommendation**:
-- Implement proper authentication system
-- Add role-based access control
-- Secure admin API endpoints
-
-### 8.2 Limited UI Scalability
-
-**Issue**: Web interface might struggle with large numbers of containers.
-
-**Impact**:
-- Poor performance with many containers
-- Degraded user experience during large events
-- Limited administrative capabilities
-
-**Recommendation**:
-- Optimize UI for large deployments
-- Implement pagination and filtering
-- Add search capabilities for containers
-
-## 9. Migrating from SQLite to PostgreSQL: Complexity Assessment
-
-### 9.1 Overview of Required Changes
-
-Migrating from SQLite to PostgreSQL would be a moderate undertaking, but not overly complex given the relatively simple database schema in the CTF deployer.
-
-### 9.2 Code Changes Required
-
-**Medium-Complexity Changes**:
-
-```python
-# database.py modifications needed:
-# 1. Connection handling (entire file)
-# 2. Query syntax adjustments (placeholders: ? → %s)
-# 3. Transaction management
-# 4. Connection pooling implementation
-```
-
-**Configuration Changes**:
+**After**: Enhanced to handle PostgreSQL database:
 ```bash
-# .env additions:
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=ctf_deployer
-DB_USER=postgres
-DB_PASSWORD=secure_password
+check_database_configuration() {
+    # Validates PostgreSQL connection parameters
+    # Warns about common security issues
+}
+
+check_db_port_conflict() {
+    # Checks for port conflicts with other PostgreSQL instances
+}
 ```
 
-**Database Schema**:
-```sql
--- Need to create tables with proper types
-CREATE TABLE containers (
-    id TEXT PRIMARY KEY,
-    port INTEGER,
-    start_time INTEGER,
-    expiration_time INTEGER,
-    user_uuid TEXT,
-    ip_address TEXT
-);
+**Remaining Concerns**:
+- No automated healthcheck for the database after deployment
+- Limited validation of database connectivity
+- No backup/restore mechanism for database content
 
-CREATE TABLE ip_requests (
-    ip_address TEXT,
-    request_time INTEGER,
-    PRIMARY KEY (ip_address, request_time)
-);
-```
+## 9. Prioritized Recommendations
 
-### 9.3 Estimated Effort
+### 9.1 High Priority (Critical for Stability and Security)
 
-| Component | Complexity | Effort (hours) |
-|-----------|------------|---------------|
-| Add PostgreSQL dependencies | Low | 1 |
-| Update config.py | Low | 2 |
-| Rewrite database.py | Medium | 4-6 |
-| Update queries in routes.py | Low | 2 |
-| Create schema migration | Low | 1-2 |
-| Testing & debugging | Medium | 4-8 |
-| **Total** | **Medium** | **14-19** |
-
-### 9.4 Main Challenges
-
-1. **Connection Pooling**: Implementing proper connection pooling for concurrent access
+1. **Implement Thread Pool**: Replace unbounded thread creation with a controlled thread pool to prevent resource exhaustion.
    ```python
-   # Example with psycopg2 pool
-   from psycopg2 import pool
-   
-   # Create connection pool
-   pg_pool = pool.ThreadedConnectionPool(5, 20,
-                                        host=DB_HOST,
-                                        port=DB_PORT,
-                                        database=DB_NAME,
-                                        user=DB_USER,
-                                        password=DB_PASSWORD)
+   thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=50)
+   thread_pool.submit(auto_remove_container, container.id, port)
    ```
 
-2. **Transaction Management**: Ensuring proper transaction isolation and commit/rollback
+2. **Improve Port Allocation**: Store port allocation in PostgreSQL with proper locking to prevent race conditions.
    ```python
-   def execute_query(query, params=(), fetchone=False):
-       conn = None
-       try:
-           conn = pg_pool.getconn()
-           with conn.cursor() as cursor:
-               cursor.execute(query, params)
-               conn.commit()
-               if fetchone:
-                   return cursor.fetchone()
-               return cursor.fetchall()
-       except Exception as e:
-           if conn:
-               conn.rollback()
-           raise e
-       finally:
-           if conn:
-               pg_pool.putconn(conn)
+   def allocate_port():
+       with conn.cursor() as cursor:
+           cursor.execute("SELECT port FROM port_allocations FOR UPDATE")
+           # Atomic allocation logic with database locking
    ```
 
-3. **Parameter Style Differences**: SQLite uses `?` placeholders, PostgreSQL uses `%s`
+3. **Add Connection Pool Monitoring**: Implement health checks and metrics for the database connection pool.
    ```python
-   # SQLite (current)
-   cursor.execute("SELECT * FROM containers WHERE id = ?", (container_id,))
-   
-   # PostgreSQL (new)
-   cursor.execute("SELECT * FROM containers WHERE id = %s", (container_id,))
+   def get_connection_pool_stats():
+       return {
+           "used_connections": pg_pool.used,
+           "free_connections": pg_pool.free,
+           "max_connections": pg_pool.maxconn
+       }
    ```
 
-4. **Deployment Complexity**: Setting up and maintaining PostgreSQL
+4. **Fix Docker Socket Security**: Implement a proxy or limited access mechanism for Docker API.
 
-### 9.5 Benefits of Migration
+### 9.2 Medium Priority (Important for Scalability)
 
-1. **Better Concurrency**: Multiple processes can write simultaneously
-2. **Improved Performance**: Under high load
-3. **Advanced Features**: Triggers, foreign keys, complex queries
-4. **Scalability**: Can be moved to a separate server if needed
-5. **Better Observability**: More monitoring options
+1. **Implement Global Resource Quotas**: Prevent system-wide resource exhaustion.
+2. **Add Database Metrics Collection**: Track query performance and error rates.
+3. **Improve Error Recovery**: Ensure proper cleanup for all failure scenarios.
+4. **Enhance Container Security**: Improve default security options for containers.
+5. **Create Better Deployment Validation**: Add more comprehensive checks during deployment.
 
-### 9.6 Deployment Considerations
+### 9.3 Low Priority (Quality of Life Improvements)
 
-1. Need to set up PostgreSQL server
-2. Implement backup and restore procedures
-3. Handle database upgrades and migrations
-4. Secure database access
-
-## 10. Prioritized Recommendations
-
-### 10.1 High Priority (Critical for Stability)
-
-1. **Database Migration to PostgreSQL**: Address the fundamental concurrency limitations
-2. **Implement Thread Pooling**: Prevent resource exhaustion from unlimited threads
-3. **Fix Port Allocation Race Conditions**: Ensure reliable container deployment
-4. **Add Global Resource Quotas**: Prevent system-wide resource exhaustion
-5. **Implement Comprehensive Error Handling**: Ensure proper cleanup on failures
-
-### 10.2 Medium Priority (Important for Scalability)
-
-1. **Improve Docker API Interaction**: Add backoff and circuit breaking
-2. **Enhance Rate Limiting**: Implement more efficient and comprehensive rate controls
-3. **Add Proper Monitoring**: Implement metrics collection and alerting
-4. **Optimize Lock File Management**: Prevent stale locks and resource leaks
-5. **Implement Structured Logging**: Improve observability and troubleshooting
-
-### 10.3 Low Priority (Quality of Life Improvements)
-
-1. **Enhance Web Interface**: Improve UI scalability for large deployments
-2. **Add Authentication System**: Improve security for admin functions
-3. **Implement Audit Logging**: Better security tracking and compliance
-4. **Add Health Check Endpoints**: Better integration with monitoring systems
-5. **Create Admin Dashboard**: Easier management of multiple deployments
+1. **Add Structured Logging**: Implement a standardized logging format.
+2. **Create Admin Dashboard**: Add a dashboard for system health visualization.
+3. **Implement Database Backup**: Add automated backup and restore functionality.
+4. **Enhance Documentation**: Improve documentation for deployment and troubleshooting.
+5. **Optimize Cleanup Procedures**: Implement more efficient resource cleanup.
 
 ## Conclusion
 
-The CTF Deployer has a solid foundation but requires several improvements to ensure stability, security, and performance under high load scenarios. The most critical issues revolve around database concurrency, resource management, and error handling. Addressing these concerns, particularly migrating to PostgreSQL, would significantly enhance the system's reliability for large-scale CTF events.
+The migration from SQLite to PostgreSQL has successfully addressed the critical database concurrency issues that limited scalability. However, several important areas still require attention, particularly around thread management, port allocation, security, and monitoring. By implementing the prioritized recommendations, the CTF Deployer can become more robust, scalable, and secure for large-scale CTF events.
+# Prioritized Issues for CTF Deployer
 
-By implementing these recommendations in order of priority, the CTF Deployer can become a robust platform capable of handling numerous simultaneous users and challenges without compromising performance or security.
+Following the PostgreSQL migration, these are the most critical issues that still need to be addressed, from highest to lowest priority:
+
+## Critical Priority (System Stability & Security)
+
+1. **Unbounded Thread Creation**
+   - **Issue**: No limit on concurrent threads for container monitoring
+   - **Impact**: System crashes under high load due to resource exhaustion
+   - **Fix**: Implement a ThreadPoolExecutor with max_workers limit
+
+2. **Port Allocation Race Conditions**
+   - **Issue**: Ports tracked in-memory with no cross-process synchronization
+   - **Impact**: Multiple containers assigned the same port during high concurrency
+   - **Fix**: Move port allocation to PostgreSQL with proper transaction locking
+
+3. **Direct Docker Socket Mounting**
+   - **Issue**: Full Docker API access from the Flask application
+   - **Impact**: Container escape risk if Flask app is compromised
+   - **Fix**: Implement a Docker API proxy with limited permissions
+
+4. **Connection Pool Monitoring**
+   - **Issue**: No visibility into database connection pool health
+   - **Impact**: Silent failures when connection pool is exhausted
+   - **Fix**: Add metrics and alerts for connection pool utilization
+
+5. **No Global Resource Quotas**
+   - **Issue**: Resource limits exist per container but not system-wide
+   - **Impact**: Host system instability under high load
+   - **Fix**: Implement global limits on total containers/resources
+
+## High Priority (Performance & Reliability)
+
+6. **Docker API Call Patterns**
+   - **Issue**: No backoff/retry for Docker API calls
+   - **Impact**: Cascading failures when Docker API is slow
+   - **Fix**: Add circuit breaker and exponential backoff
+
+7. **Incomplete Error Recovery**
+   - **Issue**: Partial operations on failure
+   - **Impact**: Resource leaks requiring manual cleanup
+   - **Fix**: Transaction-like semantics for multi-step operations
+
+8. **Missing Database Performance Metrics**
+   - **Issue**: No visibility into query performance
+   - **Impact**: Cannot identify or fix slow operations
+   - **Fix**: Implement slow query logging and performance tracking
+
+## Medium Priority (Operability & Maintenance)
+
+9. **Limited Container Security Options**
+   - **Issue**: Default to less secure container configurations
+   - **Impact**: Higher risk environment for CTF challenges
+   - **Fix**: Improve default security settings
+
+10. **Insufficient Observability**
+    - **Issue**: Limited structured logging and metrics
+    - **Impact**: Difficult to troubleshoot issues
+    - **Fix**: Add structured logging with correlation IDs
+
+11. **Database Backup Mechanism**
+    - **Issue**: No automated backup/restore for PostgreSQL
+    - **Impact**: Risk of data loss
+    - **Fix**: Implement periodic database backups
+
+## Low Priority (Enhancements)
+
+12. **Improved Administrative Interface**
+    - **Issue**: Limited management capabilities
+    - **Impact**: Difficult to monitor and manage multiple challenges
+    - **Fix**: Create an admin dashboard with better controls
+
+13. **Documentation Updates**
+    - **Issue**: Documentation doesn't reflect PostgreSQL migration
+    - **Impact**: Confusion for operators and developers
+    - **Fix**: Update all documentation with PostgreSQL-specific guidance
+
+14. **Alert System**
+    - **Issue**: No proactive notifications for issues
+    - **Impact**: Delayed response to problems
+    - **Fix**: Add email/Slack alerts for critical events
+
+15. **Deployment Automation**
+    - **Issue**: Manual steps required for deployment
+    - **Impact**: Potential for human error
+    - **Fix**: Create fully automated deployment pipeline
