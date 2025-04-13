@@ -128,6 +128,24 @@ CONTAINER_CHECK_INTERVAL = get_env_or_fail('CONTAINER_CHECK_INTERVAL', int, defa
 PORT_ALLOCATION_MAX_ATTEMPTS = get_env_or_fail('PORT_ALLOCATION_MAX_ATTEMPTS', int, default=5)
 CAPTCHA_TTL = get_env_or_fail('CAPTCHA_TTL', int, default=300)  # 5 minutes
 STALE_PORT_MAX_AGE = get_env_or_fail('STALE_PORT_MAX_AGE', int, default=RATE_LIMIT_WINDOW)  # Default to rate limit window
+# Global resource quota settings
+MAX_TOTAL_CONTAINERS = get_env_or_fail('MAX_TOTAL_CONTAINERS', int, default=100)
+MAX_TOTAL_CPU_PERCENT = get_env_or_fail('MAX_TOTAL_CPU_PERCENT', int, default=800)  # 800% = 8 cores fully utilized
+MAX_TOTAL_MEMORY_GB = get_env_or_fail('MAX_TOTAL_MEMORY_GB', float, default=32)  # Maximum total memory in GB
+RESOURCE_CHECK_INTERVAL = get_env_or_fail('RESOURCE_CHECK_INTERVAL', int, default=10)  # Seconds between resource checks
+
+# Resource quota soft limits (percentage of hard limits, used for warnings)
+RESOURCE_SOFT_LIMIT_PERCENT = get_env_or_fail('RESOURCE_SOFT_LIMIT_PERCENT', int, default=80)  # 80% of hard limits
+
+# Enable/disable global resource quotas
+ENABLE_RESOURCE_QUOTAS = get_env_or_fail('ENABLE_RESOURCE_QUOTAS', lambda x: x.lower() == 'true', default=True)
+
+# Resource quota validation
+if MAX_TOTAL_CONTAINERS <= 0 or MAX_TOTAL_CPU_PERCENT <= 0 or MAX_TOTAL_MEMORY_GB <= 0:
+    logger.error(f"Resource quota values must be positive: Containers={MAX_TOTAL_CONTAINERS}, CPU={MAX_TOTAL_CPU_PERCENT}%, Memory={MAX_TOTAL_MEMORY_GB}GB")
+    sys.exit(1)
+
+logger.info(f"Global resource quotas configured: Max Containers={MAX_TOTAL_CONTAINERS}, CPU={MAX_TOTAL_CPU_PERCENT}%, Memory={MAX_TOTAL_MEMORY_GB}GB")
 
 # Validation checks
 if START_RANGE >= STOP_RANGE:

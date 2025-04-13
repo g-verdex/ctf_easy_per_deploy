@@ -1,3 +1,4 @@
+# Add to imports at the top
 from routes import app, start_maintenance_timer
 from database import init_db, init_db_pool, execute_query, perform_maintenance
 from docker_utils import client, shutdown_thread_pool
@@ -7,6 +8,8 @@ import sys
 import atexit
 import os
 import logging
+# New import for resource monitoring
+import resource_monitor
 
 # Setup logging
 logger = logging.getLogger('ctf-deployer')
@@ -38,7 +41,15 @@ def cleanup_all_resources():
     except Exception as e:
         logger.error(f"Error during final maintenance: {e}")
     
+    # Shutdown resource monitor
+    try:
+        resource_monitor.shutdown()
+        logger.info("Resource monitor shutdown complete")
+    except Exception as e:
+        logger.error(f"Error shutting down resource monitor: {e}")
+    
     logger.info("Cleanup complete. Exiting...")
+
 
 # Function to cleanup all user containers
 def cleanup_all_containers():
@@ -91,6 +102,7 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+
 if __name__ == "__main__":
     # Initialize the database connection pool
     init_db_pool()
@@ -105,6 +117,14 @@ if __name__ == "__main__":
         logger.info("Initial maintenance complete")
     except Exception as e:
         logger.error(f"Error during initial maintenance: {e}")
+    
+    # Initialize resource monitor
+    try:
+        logger.info("Initializing resource monitor...")
+        resource_monitor.initialize()
+        logger.info("Resource monitor initialized")
+    except Exception as e:
+        logger.error(f"Error initializing resource monitor: {e}")
     
     # Start the maintenance timer AFTER database initialization
     maintenance_thread = start_maintenance_timer()

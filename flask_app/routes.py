@@ -25,9 +25,12 @@ from config import (
     CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
     CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
     ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW,
-    NETWORK_NAME, BYPASS_CAPTCHA, MAINTENANCE_INTERVAL
+    NETWORK_NAME, BYPASS_CAPTCHA, MAINTENANCE_INTERVAL, ENABLE_RESOURCE_QUOTAS, DB_HOST, DB_NAME
 )
 from captcha import create_captcha, validate_captcha
+import resource_monitor
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+import metrics
 
 app = Flask(__name__)
 
@@ -64,12 +67,76 @@ def start_maintenance_timer(interval=None):
                 logger.info("Scheduled maintenance completed")
             except Exception as e:
                 logger.error(f"Error during scheduled maintenance: {str(e)}")
+                # Record error in metrics
+                metrics.ERRORS_TOTAL.labels(error_type='maintenance').inc()
             time.sleep(interval)
     
     thread = threading.Thread(target=maintenance_task, daemon=True)
     thread.start()
     logger.info(f"Started maintenance timer with {interval}s interval")
     return thread
+
+def is_local_network(ip_address):
+    """
+    Check if the IP address belongs to a local network
+    - 127.x.x.x (localhost)
+    - 10.x.x.x (private class A)
+    - 172.16.x.x - 172.31.x.x (private class B, includes Docker networks)
+    - 192.168.x.x (private class C)
+    - ::1 (localhost IPv6)
+    """
+    if not ip_address:
+        return False
+        
+    # Check for localhost
+    if ip_address in ('127.0.0.1', 'localhost', '::1'):
+        return True
+        
+    # Check for RFC1918 private networks
+    if ip_address.startswith('10.'):
+        return True
+        
+    if ip_address.startswith('192.168.'):
+        return True
+        
+    # Check for Docker's default network range
+    if ip_address.startswith('172.'):
+        try:
+            # Extract the second octet to check if it's in the private range (16-31)
+            second_octet = int(ip_address.split('.')[1])
+            if 16 <= second_octet <= 31:
+                return True
+        except (ValueError, IndexError):
+            pass
+    
+    return False
+
+def check_admin_auth(request, admin_only=True):
+    """
+    Check if the request is authorized based on admin key or network
+    
+    Args:
+        request: Flask request object
+        admin_only: If True, requires admin key except for local networks
+                   If False, allows local networks without admin key
+    
+    Returns:
+        (bool, str): (is_authorized, error_message)
+    """
+    admin_key = request.args.get('admin_key', '')
+    expected_admin_key = os.environ.get('ADMIN_KEY', '')
+    
+    # Validate admin key if provided
+    if admin_key and admin_key == expected_admin_key:
+        return True, None
+    
+    # Check network address
+    if not admin_only or is_local_network(request.remote_addr):
+        return True, None
+        
+    # Not authorized
+    return False, "Unauthorized. Access restricted to local network or with valid admin key"
+
 
 @app.template_filter('to_datetime')
 def to_datetime_filter(timestamp):
@@ -132,6 +199,8 @@ def index():
 def get_captcha():
     """Generate a new CAPTCHA challenge"""
     captcha_id, captcha_image = create_captcha()
+    # Record captcha generation in metrics
+    metrics.CAPTCHA_GENERATED.inc()
     return jsonify({
         "captcha_id": captcha_id,
         "captcha_image": captcha_image
@@ -139,215 +208,285 @@ def get_captcha():
 
 @app.route("/deploy", methods=["POST"])
 def deploy_container():
-    try:
-        user_uuid = request.cookies.get(COOKIE_NAME)
-        
-        if not user_uuid:
-            logger.error(f"Session error: No {COOKIE_NAME} cookie found")
-            return jsonify({"error": "Session error. Please refresh the page."}), 400
-        
-        remote_ip = request.remote_addr
-        logger.info(f"Deploy request from IP: {remote_ip}, UUID: {user_uuid}")
-        
-        # Check if IP has hit rate limits - using config values
+    # Use timing context to measure container deployment duration
+    with metrics.TimingContext(metrics.CONTAINER_DEPLOYMENT_DURATION):
         try:
-            # Use the config values directly here
-            if check_ip_rate_limit(remote_ip):
-                logger.warning(f"Rate limit exceeded for IP: {remote_ip}")
-                return jsonify({"error": f"You have reached the maximum number of deployments allowed per hour (limit: {MAX_CONTAINERS_PER_HOUR})."}), 429
-        except Exception as e:
-            logger.error(f"Error during rate limit check: {str(e)}")
-            return jsonify({"error": "Internal server error during rate limit check."}), 500
-
-        # Log request data for debugging
-        try:
-            data = request.get_json()
-            logger.info(f"Request data: {data}")
+            user_uuid = request.cookies.get(COOKIE_NAME)
             
-            if not data:
-                logger.error("No JSON data in request")
-                return jsonify({"error": "Invalid request format. Please refresh and try again."}), 400
+            if not user_uuid:
+                logger.error(f"Session error: No {COOKIE_NAME} cookie found")
+                metrics.ERRORS_TOTAL.labels(error_type='session_error').inc()
+                return jsonify({"error": "Session error. Please refresh the page."}), 400
             
-            # Check for captcha bypass
-            if not BYPASS_CAPTCHA:
-                captcha_id = data.get('captcha_id')
-                captcha_answer = data.get('captcha_answer')
-                
-                if not captcha_id or not captcha_answer:
-                    logger.error(f"Missing captcha data: id={captcha_id}, answer={captcha_answer}")
-                    return jsonify({"error": "CAPTCHA verification required"}), 400
-                
-                logger.info(f"Validating captcha: id={captcha_id}, answer={captcha_answer}")
-                if not validate_captcha(captcha_id, captcha_answer):
-                    logger.error(f"Incorrect captcha answer: {captcha_answer}")
-                    return jsonify({"error": "Incorrect CAPTCHA answer. Please try again."}), 400
-            else:
-                logger.info("CAPTCHA validation bypassed due to BYPASS_CAPTCHA=true")
-                
-        except Exception as e:
-            logger.error(f"Error parsing request data: {str(e)}")
-            return jsonify({"error": "Invalid request format. Please refresh and try again."}), 400
-
-        try:
-            existing_container = get_container_by_uuid(user_uuid)
-            if existing_container:
-                logger.warning(f"User {user_uuid} already has container: {existing_container[0]}")
-                return jsonify({"error": "You already have a running container"}), 400
-        except Exception as e:
-            logger.error(f"Error checking existing container: {str(e)}")
-            return jsonify({"error": "Error checking for existing containers."}), 500
-        
-        # Create a shortened UUID for container naming
-        short_uuid = user_uuid.split('-')[0] if '-' in user_uuid else user_uuid[:8]
-        
-        # First create the container to get its ID
-        expiration_time = int(time.time()) + LEAVE_TIME
-        
-        try:
-            # Get security options
-            security_options = get_container_security_options()
-            logger.info(f"Security options: {security_options}")
+            remote_ip = request.remote_addr
+            logger.info(f"Deploy request from IP: {remote_ip}, UUID: {user_uuid}")
             
-            # Get capability options
-            capabilities = get_container_capabilities()
-            logger.info(f"Capabilities: {capabilities}")
-            
-            # Get tmpfs configuration
-            tmpfs = get_container_tmpfs()
-            logger.info(f"Tmpfs config: {tmpfs}")
-        except Exception as e:
-            logger.error(f"Error configuring container options: {str(e)}")
-            return jsonify({"error": "Error configuring container security options."}), 500
-        
-        # Prepare container configuration without port (we'll update it later)
-        try:
-            # Get the base project name from environment
-            base_project_name = os.environ.get('COMPOSE_PROJECT_NAME', 'ctf_task')
-            
-            # Create a container name based on the base project name and user UUID
-            # Replace hyphens with underscores for valid Docker container names
-            user_id_part = user_uuid.replace('-', '_')
-            container_name = f"{base_project_name}_session_{user_id_part}"
-        except Exception as e:
-            logger.error(f"Error preparing container name: {str(e)}")
-            return jsonify({"error": "Error preparing container configuration."}), 500
-            
-        # Create container without starting it initially
-        try:
-            # Create container with minimal configuration to get an ID
-            container = client.containers.create(
-                image=IMAGES_NAME,
-                hostname=f"ctf-challenge-{short_uuid}",
-                name=container_name,
-                detach=True,
-                environment={'FLAG': FLAG},
-                network=NETWORK_NAME
-            )
-            logger.info(f"Created container skeleton: {container.id} with name: {container_name}")
-            
-            # Now allocate a port in the database with the container ID
-            port = allocate_port(container_id=container.id)
-            if not port:
-                # Clean up container if port allocation fails
-                container.remove(force=True)
-                logger.error("Failed to allocate port from database")
-                return jsonify({"error": "No available ports. Please try again later."}), 503
-                
-            logger.info(f"Allocated port {port} for container {container.id}")
-            
-            # Update container with port mapping and all other settings
-            # Container must be removed and recreated with the new settings
-            container.remove(force=True)
-            
-            container_config = {
-                'image': IMAGES_NAME,
-                'detach': True,
-                'ports': {f"{PORT_IN_CONTAINER}/tcp": port},
-                'environment': {'FLAG': FLAG},
-                'hostname': f"ctf-challenge-{short_uuid}",
-                'security_opt': security_options,
-                'mem_limit': CONTAINER_MEMORY_LIMIT,
-                'memswap_limit': CONTAINER_SWAP_LIMIT,
-                'cpu_period': 100000,  # Default period (100ms)
-                'cpu_quota': int(100000 * CONTAINER_CPU_LIMIT),  # Adjust quota based on CPU limit
-                'pids_limit': CONTAINER_PIDS_LIMIT,
-                'read_only': ENABLE_READ_ONLY,
-                'network': NETWORK_NAME,
-                'name': container_name
-            }
-            
-            # Add capabilities if needed
-            if capabilities['drop_all']:
-                container_config['cap_drop'] = ['ALL']
-                container_config['cap_add'] = capabilities['add']
-            
-            # Add tmpfs if configured
-            if tmpfs:
-                container_config['tmpfs'] = tmpfs
-            
-            # Create and start the new container with all settings
-            container = client.containers.run(**container_config)
-            logger.info(f"Started container: {container.id} with name: {container_name} on port {port}")
-            
-        except Exception as e:
-            # If anything fails, make sure to release the port
-            if port:
-                release_port(port)
-            logger.error(f"Error creating container: {str(e)}")
-            return jsonify({"error": f"Failed to create container: {str(e)}"}), 500
-
-        try:
-            # Record this IP request
-            if not record_ip_request(remote_ip):
-                logger.warning(f"Failed to record IP request for {remote_ip}")
-            
-            # Store container in database
-            if not store_container(container.id, port, user_uuid, remote_ip, expiration_time):
-                raise Exception("Failed to store container in database")
-
-            # Use the thread pool to monitor this container instead of creating a new thread
-            monitor_container(container.id, port)
-            
-        except Exception as e:
-            logger.error(f"Error recording container in database: {str(e)}")
-            # Try to clean up container if database insert fails
+            # Check if IP has hit rate limits - using config values
             try:
+                # Record rate limit check
+                metrics.RATE_LIMIT_CHECKS.inc()
+                
+                # Use the config values directly here
+                if check_ip_rate_limit(remote_ip):
+                    logger.warning(f"Rate limit exceeded for IP: {remote_ip}")
+                    # Rate limit rejection counter is incremented in check_ip_rate_limit function
+                    return jsonify({"error": f"You have reached the maximum number of deployments allowed per hour (limit: {MAX_CONTAINERS_PER_HOUR})."}), 429
+            except Exception as e:
+                logger.error(f"Error during rate limit check: {str(e)}")
+                metrics.ERRORS_TOTAL.labels(error_type='rate_limit_check_error').inc()
+                return jsonify({"error": "Internal server error during rate limit check."}), 500
+
+            # Log request data for debugging
+            try:
+                data = request.get_json()
+                logger.info(f"Request data: {data}")
+                
+                if not data:
+                    logger.error("No JSON data in request")
+                    metrics.ERRORS_TOTAL.labels(error_type='invalid_request').inc()
+                    return jsonify({"error": "Invalid request format. Please refresh and try again."}), 400
+                
+                # Check for captcha bypass
+                if not BYPASS_CAPTCHA:
+                    captcha_id = data.get('captcha_id')
+                    captcha_answer = data.get('captcha_answer')
+                    
+                    if not captcha_id or not captcha_answer:
+                        logger.error(f"Missing captcha data: id={captcha_id}, answer={captcha_answer}")
+                        metrics.ERRORS_TOTAL.labels(error_type='missing_captcha').inc()
+                        return jsonify({"error": "CAPTCHA verification required"}), 400
+                    
+                    logger.info(f"Validating captcha: id={captcha_id}, answer={captcha_answer}")
+                    if not validate_captcha(captcha_id, captcha_answer):
+                        logger.error(f"Incorrect captcha answer: {captcha_answer}")
+                        metrics.ERRORS_TOTAL.labels(error_type='invalid_captcha').inc()
+                        return jsonify({"error": "Incorrect CAPTCHA answer. Please try again."}), 400
+                    
+                    # Record successful captcha validation
+                    metrics.CAPTCHA_VALIDATIONS.inc()
+                else:
+                    logger.info("CAPTCHA validation bypassed due to BYPASS_CAPTCHA=true")
+                    
+            except Exception as e:
+                logger.error(f"Error parsing request data: {str(e)}")
+                metrics.ERRORS_TOTAL.labels(error_type='request_parsing').inc()
+                return jsonify({"error": "Invalid request format. Please refresh and try again."}), 400
+
+            try:
+                existing_container = get_container_by_uuid(user_uuid)
+                if existing_container:
+                    logger.warning(f"User {user_uuid} already has container: {existing_container[0]}")
+                    metrics.ERRORS_TOTAL.labels(error_type='duplicate_container').inc()
+                    return jsonify({"error": "You already have a running container"}), 400
+            except Exception as e:
+                logger.error(f"Error checking existing container: {str(e)}")
+                metrics.ERRORS_TOTAL.labels(error_type='container_check').inc()
+                return jsonify({"error": "Error checking for existing containers."}), 500
+            
+            # Add resource quota check here
+            if ENABLE_RESOURCE_QUOTAS:
+                # Estimate resource usage for new container (CPU in %, memory in GB)
+                container_cpu = float(CONTAINER_CPU_LIMIT) * 100  # Convert to percentage
+                container_memory = float(CONTAINER_MEMORY_LIMIT.rstrip('M')) / 1024  # Convert MB to GB
+                
+                # Increment resource quota check counter
+                metrics.RESOURCE_QUOTA_CHECKS.inc()
+                
+                # Check if resources are available
+                resources_available, message = resource_monitor.check_resource_availability(
+                    container_cpu=container_cpu,
+                    container_memory=container_memory
+                )
+                
+                if not resources_available:
+                    logger.warning(f"Resource quota exceeded: {message}")
+                    # Note: The resource_monitor.check_resource_availability function 
+                    # already increments the RESOURCE_QUOTA_REJECTIONS counter
+                    return jsonify({
+                        "error": f"Server resource limit reached. Please try again later. {message}"
+                    }), 503
+                
+                logger.info(f"Resource check passed: {message}")
+            
+            # Create a shortened UUID for container naming
+            short_uuid = user_uuid.split('-')[0] if '-' in user_uuid else user_uuid[:8]
+            
+            # First create the container to get its ID
+            expiration_time = int(time.time()) + LEAVE_TIME
+            
+            try:
+                # Get security options
+                security_options = get_container_security_options()
+                logger.info(f"Security options: {security_options}")
+                
+                # Get capability options
+                capabilities = get_container_capabilities()
+                logger.info(f"Capabilities: {capabilities}")
+                
+                # Get tmpfs configuration
+                tmpfs = get_container_tmpfs()
+                logger.info(f"Tmpfs config: {tmpfs}")
+            except Exception as e:
+                logger.error(f"Error configuring container options: {str(e)}")
+                metrics.ERRORS_TOTAL.labels(error_type='container_config').inc()
+                return jsonify({"error": "Error configuring container security options."}), 500
+            
+            # Prepare container configuration without port (we'll update it later)
+            try:
+                # Get the base project name from environment
+                base_project_name = os.environ.get('COMPOSE_PROJECT_NAME', 'ctf_task')
+                
+                # Create a container name based on the base project name and user UUID
+                # Replace hyphens with underscores for valid Docker container names
+                user_id_part = user_uuid.replace('-', '_')
+                container_name = f"{base_project_name}_session_{user_id_part}"
+            except Exception as e:
+                logger.error(f"Error preparing container name: {str(e)}")
+                metrics.ERRORS_TOTAL.labels(error_type='container_naming').inc()
+                return jsonify({"error": "Error preparing container configuration."}), 500
+                
+            # Create container without starting it initially
+            port = None  # Define outside try block for error handling
+            try:
+                # Create container with minimal configuration to get an ID
+                container = client.containers.create(
+                    image=IMAGES_NAME,
+                    hostname=f"ctf-challenge-{short_uuid}",
+                    name=container_name,
+                    detach=True,
+                    environment={'FLAG': FLAG},
+                    network=NETWORK_NAME
+                )
+                logger.info(f"Created container skeleton: {container.id} with name: {container_name}")
+                
+                # Now allocate a port in the database with the container ID
+                port = allocate_port(container_id=container.id)
+                if not port:
+                    # Clean up container if port allocation fails
+                    container.remove(force=True)
+                    logger.error("Failed to allocate port from database")
+                    metrics.PORT_ALLOCATION_FAILURES.inc()
+                    return jsonify({"error": "No available ports. Please try again later."}), 503
+                    
+                logger.info(f"Allocated port {port} for container {container.id}")
+                
+                # Update container with port mapping and all other settings
+                # Container must be removed and recreated with the new settings
                 container.remove(force=True)
+                
+                container_config = {
+                    'image': IMAGES_NAME,
+                    'detach': True,
+                    'ports': {f"{PORT_IN_CONTAINER}/tcp": port},
+                    'environment': {'FLAG': FLAG},
+                    'hostname': f"ctf-challenge-{short_uuid}",
+                    'security_opt': security_options,
+                    'mem_limit': CONTAINER_MEMORY_LIMIT,
+                    'memswap_limit': CONTAINER_SWAP_LIMIT,
+                    'cpu_period': 100000,  # Default period (100ms)
+                    'cpu_quota': int(100000 * CONTAINER_CPU_LIMIT),  # Adjust quota based on CPU limit
+                    'pids_limit': CONTAINER_PIDS_LIMIT,
+                    'read_only': ENABLE_READ_ONLY,
+                    'network': NETWORK_NAME,
+                    'name': container_name
+                }
+                
+                # Add capabilities if needed
+                if capabilities['drop_all']:
+                    container_config['cap_drop'] = ['ALL']
+                    container_config['cap_add'] = capabilities['add']
+                
+                # Add tmpfs if configured
+                if tmpfs:
+                    container_config['tmpfs'] = tmpfs
+                
+                # Create and start the new container with all settings
+                container = client.containers.run(**container_config)
+                logger.info(f"Started container: {container.id} with name: {container_name} on port {port}")
+                
+            except Exception as e:
+                # If anything fails, make sure to release the port
                 if port:
                     release_port(port)
-                logger.info(f"Removed container {container.id} due to database error")
-            except:
-                logger.error(f"Failed to remove container {container.id} after database error")
-            return jsonify({"error": "Error recording container information."}), 500
-        
-        return jsonify({
-            "message": "Your CTF challenge is ready! Redirecting to your instance...",
-            "port": port, 
-            "id": container.id, 
-            "expiration_time": expiration_time
-        })
-    except Exception as e:
-        logger.error(f"Unhandled error in deploy_container: {str(e)}")
-        return jsonify({"error": f"Failed to start container: {str(e)}"}), 500
+                metrics.ERRORS_TOTAL.labels(error_type='container_creation').inc()
+                logger.error(f"Error creating container: {str(e)}")
+                return jsonify({"error": f"Failed to create container: {str(e)}"}), 500
+
+            try:
+                # Record this IP request
+                if not record_ip_request(remote_ip):
+                    logger.warning(f"Failed to record IP request for {remote_ip}")
+                
+                # Store container in database
+                if not store_container(container.id, port, user_uuid, remote_ip, expiration_time):
+                    raise Exception("Failed to store container in database")
+
+                # Use the thread pool to monitor this container instead of creating a new thread
+                monitor_container(container.id, port)
+                
+                # Record successful deployment in metrics
+                metrics.CONTAINER_DEPLOYMENTS_TOTAL.inc()
+                
+            except Exception as e:
+                logger.error(f"Error recording container in database: {str(e)}")
+                metrics.ERRORS_TOTAL.labels(error_type='container_recording').inc()
+                # Try to clean up container if database insert fails
+                try:
+                    container.remove(force=True)
+                    if port:
+                        release_port(port)
+                    logger.info(f"Removed container {container.id} due to database error")
+                except:
+                    logger.error(f"Failed to remove container {container.id} after database error")
+                return jsonify({"error": "Error recording container information."}), 500
+            
+            return jsonify({
+                "message": "Your CTF challenge is ready! Redirecting to your instance...",
+                "port": port, 
+                "id": container.id, 
+                "expiration_time": expiration_time
+            })
+        except Exception as e:
+            logger.error(f"Unhandled error in deploy_container: {str(e)}")
+            metrics.ERRORS_TOTAL.labels(error_type='unhandled').inc()
+            return jsonify({"error": f"Failed to start container: {str(e)}"}), 500
 
 @app.route("/stop", methods=["POST"])
 def stop_container():
     user_uuid = request.cookies.get(COOKIE_NAME)
     
     if not user_uuid:
+        metrics.ERRORS_TOTAL.labels(error_type='session_error').inc()
         return jsonify({"error": "Session error. Please refresh the page."}), 400
 
     try:
         container_data = execute_query("SELECT id, port FROM containers WHERE user_uuid = %s", (user_uuid,), fetchone=True)
         if not container_data:
+            metrics.ERRORS_TOTAL.labels(error_type='no_container').inc()
             return jsonify({"error": "No active container"}), 400
 
         container_id, port = container_data
+
+        # Record container lifetime
+        try:
+            # Get start time from database
+            container_info = execute_query(
+                "SELECT start_time FROM containers WHERE id = %s",
+                (container_id,),
+                fetchone=True
+            )
+            if container_info and container_info[0]:
+                start_time = container_info[0]
+                lifetime = time.time() - start_time
+                metrics.CONTAINER_LIFETIME.observe(lifetime)
+        except Exception as e:
+            logger.error(f"Error recording container lifetime: {str(e)}")
 
         remove_container(container_id, port)
         return jsonify({"message": "Challenge instance stopped successfully"})
     except Exception as e:
         logger.error(f"Error in stop_container: {str(e)}")
+        metrics.ERRORS_TOTAL.labels(error_type='container_stop').inc()
         return jsonify({"error": f"Failed to stop container: {str(e)}"}), 500
 
 @app.route("/restart", methods=["POST"])
@@ -355,22 +494,30 @@ def restart_container():
     user_uuid = request.cookies.get(COOKIE_NAME)
     
     if not user_uuid:
+        metrics.ERRORS_TOTAL.labels(error_type='session_error').inc()
         return jsonify({"error": "Session error. Please refresh the page."}), 400
 
     try:
         container_data = execute_query("SELECT id FROM containers WHERE user_uuid = %s", (user_uuid,), fetchone=True)
         if not container_data:
+            metrics.ERRORS_TOTAL.labels(error_type='no_container').inc()
             return jsonify({"error": "No active container"}), 400
         
         container_id = container_data[0]
         
         container = client.containers.get(container_id)
         container.restart()
+        
+        # Record container restart
+        metrics.CONTAINER_RESTARTS.inc()
+        
         return jsonify({"message": "Challenge instance restarted successfully"})
     except docker.errors.NotFound:
+        metrics.ERRORS_TOTAL.labels(error_type='container_not_found').inc()
         return jsonify({"error": "Container not found"}), 404
     except Exception as e:
         logger.error(f"Error in restart_container: {str(e)}")
+        metrics.ERRORS_TOTAL.labels(error_type='container_restart').inc()
         return jsonify({"error": f"Failed to restart container: {str(e)}"}), 500
 
 @app.route("/extend", methods=["POST"])
@@ -378,11 +525,13 @@ def extend_container_lifetime():
     user_uuid = request.cookies.get(COOKIE_NAME)
     
     if not user_uuid:
+        metrics.ERRORS_TOTAL.labels(error_type='session_error').inc()
         return jsonify({"error": "Session error. Please refresh the page."}), 400
 
     try:
         container_data = execute_query("SELECT id, expiration_time FROM containers WHERE user_uuid = %s", (user_uuid,), fetchone=True)
         if not container_data:
+            metrics.ERRORS_TOTAL.labels(error_type='no_container').inc()
             return jsonify({"error": "No active container"}), 400
             
         container_id, expiration_time = container_data
@@ -396,20 +545,50 @@ def extend_container_lifetime():
             (new_expiration_time, container_id)
         )
         
+        # Record container lifetime extension
+        metrics.CONTAINER_LIFETIME_EXTENSIONS.inc()
+        
         return jsonify({
             "message": f"Challenge lifetime extended by {ADD_TIME // 60} minutes!", 
             "new_expiration_time": new_expiration_time
         })
     except Exception as e:
         logger.error(f"Error in extend_container_lifetime: {str(e)}")
+        metrics.ERRORS_TOTAL.labels(error_type='container_extend').inc()
         return jsonify({"error": f"Failed to extend container lifetime: {str(e)}"}), 500
 
-@app.route("/status")
-def status():
-    """Endpoint to check the status of the deployer service"""
+@app.route("/admin")
+def admin_panel():
+    """Admin panel for monitoring and management"""
+    return render_template("admin.html")
+
+@app.route("/admin/status")
+def admin_status():
+    """Combined status endpoint with detailed information about the deployer service"""
     try:
+        # Security check - verify admin key or localhost
+        admin_key = request.args.get('admin_key', '')
+        is_localhost = request.remote_addr in ('127.0.0.1', 'localhost', '::1')
+        is_docker_network = request.remote_addr.startswith('172.')  # Docker's default network
+        expected_admin_key = os.environ.get('ADMIN_KEY', '')
+        
+        # Allow access from localhost or Docker network without key, or with valid key from anywhere
+        if not (is_localhost or is_docker_network) and admin_key != expected_admin_key:
+            logger.warning(f"Unauthorized status access attempt from {request.remote_addr}")
+            metrics.ERRORS_TOTAL.labels(error_type='unauthorized_access').inc()
+            return jsonify({"error": "Unauthorized. Access restricted to local network or with valid admin key"}), 403
+        
+        # Basic info always included
+        basic_info = {
+            "status": "online",
+            "service": "CTF Challenge Deployer",
+            "version": "1.2",
+            "challenge": CHALLENGE_TITLE
+        }
+        
         # Get database statistics and active containers
         active_containers = execute_query("SELECT COUNT(*) FROM containers", fetchone=True)[0]
+        total_containers_created = execute_query("SELECT COUNT(*) FROM ip_requests", fetchone=True)[0]
         
         # Get database connection pool stats
         pool_stats = get_connection_pool_stats()
@@ -420,13 +599,117 @@ def status():
             fetchone=True
         )[0]
         
-        return jsonify({
+        total_ports = execute_query(
+            "SELECT COUNT(*) FROM port_allocations", 
+            fetchone=True
+        )[0]
+        
+        # Get resource usage stats if resource quotas are enabled
+        resource_stats = {}
+        if ENABLE_RESOURCE_QUOTAS:
+            usage = resource_monitor.get_resource_usage()
+            resource_stats = {
+                "status": usage["status"],
+                "containers": {
+                    "current": usage["containers"]["current"],
+                    "limit": usage["containers"]["limit"],
+                    "percent": f"{usage['containers']['percent']:.1f}%"
+                },
+                "cpu": {
+                    "current": f"{usage['cpu']['current']:.1f}%",
+                    "limit": f"{usage['cpu']['limit']}%",
+                    "percent": f"{usage['cpu']['percent']:.1f}%"
+                },
+                "memory": {
+                    "current": f"{usage['memory']['current']:.2f} GB",
+                    "limit": f"{usage['memory']['limit']} GB",
+                    "percent": f"{usage['memory']['percent']:.1f}%"
+                },
+                "last_updated": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(usage["last_updated"]))
+            }
+        
+        # Active containers details (only in detailed view)
+        active_container_details = []
+        try:
+            containers = execute_query("SELECT id, port, start_time, expiration_time, user_uuid, ip_address FROM containers")
+            for container in containers:
+                container_id, port, start_time, exp_time, user_uuid, ip_address = container
+                container_detail = {
+                    "id": container_id[:12] + "...",  # Truncate for display
+                    "full_id": container_id,
+                    "port": port,
+                    "start_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time)),
+                    "expiration_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exp_time)),
+                    "time_left": exp_time - int(time.time()),
+                    "user_uuid": user_uuid,
+                    "ip_address": ip_address
+                }
+                
+                # Try to get container status from Docker
+                try:
+                    container_status = get_container_status(container_id)
+                    container_detail["status"] = container_status.get('status', 'unknown')
+                    container_detail["running"] = container_status.get('running', False)
+                except:
+                    container_detail["status"] = "error"
+                    container_detail["running"] = False
+                
+                active_container_details.append(container_detail)
+        except Exception as e:
+            logger.error(f"Error getting container details: {str(e)}")
+            active_container_details = [{"error": str(e)}]
+        
+        # Rate limit info
+        rate_limit_info = {
+            "max_containers_per_hour": MAX_CONTAINERS_PER_HOUR,
+            "window_seconds": RATE_LIMIT_WINDOW
+        }
+        
+        # Build combined response
+        response = {
+            **basic_info,
+            "metrics": {
+                "active_containers": active_containers,
+                "total_containers_created": total_containers_created,
+                "available_ports": available_ports,
+                "total_ports": total_ports,
+                "port_usage_percent": f"{(total_ports - available_ports) / total_ports * 100:.1f}%" if total_ports > 0 else "0%"
+            },
+            "database": {
+                "connection_pool": pool_stats,
+                "host": DB_HOST,
+                "name": DB_NAME
+            },
+            "resources": resource_stats,
+            "rate_limiting": rate_limit_info,
+            "containers": active_container_details
+        }
+        
+        return jsonify(response)
+    except Exception as e:
+        logger.error(f"Error in admin status endpoint: {str(e)}")
+        metrics.ERRORS_TOTAL.labels(error_type='status_endpoint').inc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/status")
+def status():
+    """Basic status endpoint - redirects to admin status with full info if admin key provided"""
+    admin_key = request.args.get('admin_key', '')
+    if admin_key:
+        return admin_status()
+    
+    # Basic status info only
+    try:
+        # Basic info always included
+        basic_info = {
             "status": "online",
-            "active_containers": active_containers,
-            "available_ports": available_ports,
-            "db_connection_pool": pool_stats,
-            "service": "CTF Challenge Deployer"
-        })
+            "service": "CTF Challenge Deployer",
+            "challenge": CHALLENGE_TITLE,
+            "message": "For detailed status, use /admin/status endpoint with admin key"
+        }
+        
+        return jsonify(basic_info)
     except Exception as e:
         logger.error(f"Error in status endpoint: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -435,3 +718,152 @@ def status():
 def health_check():
     """Simple health check endpoint for monitoring systems"""
     return jsonify({"status": "healthy"})
+
+@app.route('/metrics')
+def metrics_endpoint():
+    """Expose Prometheus metrics with security controls"""
+    try:
+        # Check authorization
+        is_authorized, error_message = check_admin_auth(request)
+        if not is_authorized:
+            logger.warning(f"Unauthorized metrics access attempt from {request.remote_addr}")
+            return jsonify({"error": error_message}), 403
+        
+        # Update database connection pool metrics before generating response
+        try:
+            pool_stats = get_connection_pool_stats()
+            metrics.update_db_connection_metrics(pool_stats)
+        except Exception as e:
+            logger.error(f"Error updating database metrics: {str(e)}")
+            # Continue despite error - we can still return other metrics
+        
+        return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+    except Exception as e:
+        logger.error(f"Error generating metrics: {str(e)}")
+        metrics.ERRORS_TOTAL.labels(error_type='metrics_endpoint').inc()
+        return jsonify({"error": "Error generating metrics"}), 500
+
+@app.route('/logs')
+def logs_endpoint():
+    """Endpoint to retrieve logs from containers
+    
+    Parameters:
+    - container_id: Optional container ID to get logs for a specific container
+    - tail: Number of lines to retrieve (default: 100)
+    - since: Timestamp to fetch logs since (in seconds since epoch)
+    - admin_key: Admin key for authentication from non-localhost
+    - format: Output format ('json' or 'text', default: 'json')
+    """
+    try:
+        # Check authorization
+        is_authorized, error_message = check_admin_auth(request)
+        if not is_authorized:
+            logger.warning(f"Unauthorized logs access attempt from {request.remote_addr}")
+            return jsonify({"error": error_message}), 403
+        
+        # Rest of the logs endpoint logic remains unchanged
+        # Get request parameters
+        container_id = request.args.get('container_id', None)
+        tail = request.args.get('tail', '100')
+        since = request.args.get('since', None)  # Time since epoch in seconds
+        output_format = request.args.get('format', 'json').lower()
+        
+        # Validate tail parameter
+        try:
+            tail = int(tail)
+            if tail < 1:
+                tail = 100
+        except (ValueError, TypeError):
+            tail = 100
+        
+        # Convert since parameter to Docker timestamp (seconds or nanoseconds)
+        since_timestamp = None
+        if since:
+            try:
+                since_timestamp = int(since)
+            except (ValueError, TypeError):
+                return jsonify({"error": "Invalid 'since' parameter. Expected Unix timestamp (seconds)"}), 400
+        
+        # Get logs for specified container or all containers owned by this instance
+        if container_id:
+            # Check if container exists in our database
+            container_data = execute_query(
+                "SELECT id FROM containers WHERE id = %s", 
+                (container_id,),
+                fetchone=True
+            )
+            
+            if not container_data:
+                return jsonify({"error": f"Container {container_id} not found or not managed by this deployer"}), 404
+            
+            # Get logs for this specific container
+            try:
+                container = client.containers.get(container_id)
+                log_data = container.logs(
+                    tail=tail,
+                    since=since_timestamp,
+                    timestamps=True
+                ).decode('utf-8', errors='replace')
+                
+                if output_format == 'text':
+                    return log_data, 200, {'Content-Type': 'text/plain'}
+                else:
+                    return jsonify({
+                        "container_id": container_id,
+                        "logs": log_data.splitlines()
+                    })
+            except docker.errors.NotFound:
+                return jsonify({"error": f"Container {container_id} not found in Docker"}), 404
+            except Exception as e:
+                logger.error(f"Error getting logs for container {container_id}: {str(e)}")
+                return jsonify({"error": f"Failed to get logs: {str(e)}"}), 500
+        else:
+            # Get all containers managed by this deployer
+            try:
+                containers = execute_query("SELECT id FROM containers")
+                
+                # No containers found
+                if not containers:
+                    return jsonify({"message": "No active containers found", "containers": {}})
+                
+                # Collect logs for all containers
+                logs_by_container = {}
+                
+                for container_data in containers:
+                    container_id = container_data[0]
+                    try:
+                        container = client.containers.get(container_id)
+                        log_data = container.logs(
+                            tail=tail,
+                            since=since_timestamp,
+                            timestamps=True
+                        ).decode('utf-8', errors='replace')
+                        
+                        logs_by_container[container_id] = log_data.splitlines() if output_format == 'json' else log_data
+                    except docker.errors.NotFound:
+                        logs_by_container[container_id] = ["Container not found in Docker"]
+                    except Exception as e:
+                        logs_by_container[container_id] = [f"Error retrieving logs: {str(e)}"]
+                
+                if output_format == 'text':
+                    # Merge all logs with container identifiers
+                    text_output = ""
+                    for container_id, logs in logs_by_container.items():
+                        text_output += f"\n===== Container: {container_id} =====\n"
+                        text_output += logs if isinstance(logs, str) else "\n".join(logs)
+                        text_output += "\n\n"
+                    
+                    return text_output, 200, {'Content-Type': 'text/plain'}
+                else:
+                    return jsonify({
+                        "containers": logs_by_container
+                    })
+                
+            except Exception as e:
+                logger.error(f"Error retrieving container logs: {str(e)}")
+                return jsonify({"error": f"Failed to retrieve logs: {str(e)}"}), 500
+    
+    except Exception as e:
+        logger.error(f"Unhandled error in logs endpoint: {str(e)}")
+        metrics.ERRORS_TOTAL.labels(error_type='logs_endpoint').inc()
+        return jsonify({"error": "Internal server error"}), 500

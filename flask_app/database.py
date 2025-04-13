@@ -9,6 +9,7 @@ from config import (
     START_RANGE, STOP_RANGE, RATE_LIMIT_WINDOW, MAX_CONTAINERS_PER_HOUR,
     PORT_ALLOCATION_MAX_ATTEMPTS, STALE_PORT_MAX_AGE
 )
+import metrics
 
 # Setup logging
 logger = logging.getLogger('ctf-deployer')
@@ -145,56 +146,80 @@ def execute_query(query, params=(), fetchone=False, max_retries=3):
     # Convert SQLite placeholder ? to PostgreSQL %s
     query = query.replace('?', '%s')
     
+    # Determine operation type for metrics
+    operation_type = 'unknown'
+    if query.strip().upper().startswith('SELECT'):
+        operation_type = 'select'
+    elif query.strip().upper().startswith('INSERT'):
+        operation_type = 'insert'
+    elif query.strip().upper().startswith('UPDATE'):
+        operation_type = 'update'
+    elif query.strip().upper().startswith('DELETE'):
+        operation_type = 'delete'
+    
+    # Increment database operation counter
+    metrics.DB_OPERATIONS.labels(operation_type=operation_type).inc()
+    
     retry_count = 0
     last_error = None
     
-    while retry_count <= max_retries:
-        conn = None
-        try:
-            conn = get_connection()
-            with conn.cursor() as cursor:
-                cursor.execute(query, params)
-                
-                # Determine if this is a SELECT query (returns data) or a modification query
-                is_select_query = query.strip().upper().startswith('SELECT')
-                
-                if is_select_query:
-                    if fetchone:
-                        result = cursor.fetchone()
-                    else:
-                        result = cursor.fetchall()
-                else:
-                    # For INSERT, UPDATE, DELETE, we don't try to fetch results
-                    conn.commit()
-                    # Return row count for non-SELECT queries
-                    result = cursor.rowcount
+    # Use timing context to measure database operation duration
+    with metrics.TimingContext(metrics.DB_OPERATION_DURATION, {'operation_type': operation_type}):
+        while retry_count <= max_retries:
+            conn = None
+            try:
+                conn = get_connection()
+                with conn.cursor() as cursor:
+                    cursor.execute(query, params)
                     
-                conn.commit()
-                return result
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            last_error = e
-            retry_count += 1
-            
-            # Only retry on specific types of errors
-            if retry_count <= max_retries:
-                wait_time = 0.5 * (2 ** (retry_count - 1))  # Exponential backoff
-                logger.warning(f"Database error: {str(e)}. Retrying in {wait_time}s... (Attempt {retry_count}/{max_retries})")
-                time.sleep(wait_time)
-            else:
-                logger.error(f"Database operation failed after {max_retries} retries: {str(e)}")
+                    # Determine if this is a SELECT query (returns data) or a modification query
+                    is_select_query = query.strip().upper().startswith('SELECT')
+                    
+                    if is_select_query:
+                        if fetchone:
+                            result = cursor.fetchone()
+                        else:
+                            result = cursor.fetchall()
+                    else:
+                        # For INSERT, UPDATE, DELETE, we don't try to fetch results
+                        conn.commit()
+                        # Return row count for non-SELECT queries
+                        result = cursor.rowcount
+                        
+                    conn.commit()
+                    return result
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                last_error = e
+                retry_count += 1
+                
+                # Increment error counter
+                metrics.ERRORS_TOTAL.labels(error_type='database_operational').inc()
+                
+                # Only retry on specific types of errors
+                if retry_count <= max_retries:
+                    wait_time = 0.5 * (2 ** (retry_count - 1))  # Exponential backoff
+                    logger.warning(f"Database error: {str(e)}. Retrying in {wait_time}s... (Attempt {retry_count}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Database operation failed after {max_retries} retries: {str(e)}")
+                    raise
+            except Exception as e:
+                # Increment error counter with specific type
+                metrics.ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
+                logger.error(f"Database error: {str(e)}")
                 raise
-        except Exception as e:
-            logger.error(f"Database error: {str(e)}")
-            raise
-        finally:
-            if conn:
-                release_connection(conn)
+            finally:
+                if conn:
+                    release_connection(conn)
 
 # Function for executing INSERT queries specifically - doesn't try to return data
 def execute_insert(query, params=()):
     """Special case for INSERT queries that don't need to return results"""
     # Convert SQLite placeholder ? to PostgreSQL %s
     query = query.replace('?', '%s')
+    
+    # Record the operation for metrics
+    metrics.DB_OPERATIONS.labels(operation_type='insert').inc()
     
     conn = None
     try:
@@ -204,6 +229,8 @@ def execute_insert(query, params=()):
             conn.commit()
             return True
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
         logger.error(f"Insert error: {str(e)}")
         if conn:
             try:
@@ -274,6 +301,9 @@ def allocate_port(container_id=None):
                 return port
                 
         except Exception as e:
+            # Increment error counter
+            metrics.ERRORS_TOTAL.labels(error_type='port_allocation').inc()
+            
             logger.error(f"Error allocating port (attempt {attempt}/{max_attempts}): {str(e)}")
             if conn:
                 try:
@@ -286,6 +316,9 @@ def allocate_port(container_id=None):
             if conn:
                 conn.autocommit = True
                 release_connection(conn)
+    
+    # Record port allocation failure
+    metrics.PORT_ALLOCATION_FAILURES.inc()
     
     logger.error(f"Failed to allocate port after {max_attempts} attempts")
     return None
@@ -319,6 +352,8 @@ def release_port(port):
             logger.info(f"Released port {port} back to the pool")
             return True
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
         logger.error(f"Error releasing port {port}: {str(e)}")
         if conn:
             try:
@@ -354,6 +389,8 @@ def is_port_allocated(port):
             
         return result[0]
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type='port_check').inc()
         logger.error(f"Error checking port {port} allocation: {str(e)}")
         return False
 
@@ -389,6 +426,8 @@ def cleanup_stale_port_allocations():
             release_port(port)
             
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type='stale_port_cleanup').inc()
         logger.error(f"Error cleaning up stale port allocations: {str(e)}")
 
 # Remove container from DB
@@ -406,6 +445,8 @@ def remove_container_from_db(container_id):
             # Release port allocation
             release_port(port)
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type='container_removal').inc()
         logger.error(f"Error retrieving port for container {container_id}: {str(e)}")
     
     # Delete the container record
@@ -429,6 +470,8 @@ def record_ip_request(ip_address):
         logger.warning(f"Duplicate request record for IP {ip_address} - ignored")
         return False
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
         logger.error(f"Error recording IP request: {str(e)}")
         return False
 
@@ -445,6 +488,9 @@ def check_ip_rate_limit(ip_address, time_window=None, max_requests=None):
     Returns:
         Boolean: True if rate limit exceeded, False otherwise
     """
+    # Record rate limit check for metrics
+    metrics.RATE_LIMIT_CHECKS.inc()
+    
     # Use configuration values if not specified
     if time_window is None:
         time_window = RATE_LIMIT_WINDOW
@@ -486,10 +532,15 @@ def check_ip_rate_limit(ip_address, time_window=None, max_requests=None):
         # Log rate limit values for debugging
         logger.info(f"IP: {ip_address}, Recent requests: {request_count}, Active containers: {active_count}, Total: {total_count}, Limit: {max_requests}")
         
-        # Check if limit exceeded
-        return total_count >= max_requests
+        # Check if limit exceeded and track in metrics if it is
+        if total_count >= max_requests:
+            metrics.RATE_LIMIT_REJECTIONS.inc()
+            return True
+        return False
         
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type='rate_limit_check').inc()
         logger.error(f"Error checking rate limit: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
@@ -516,9 +567,13 @@ def store_container(container_id, port, user_uuid, ip_address, expiration_time):
             (container_id, port, current_time, expiration_time, user_uuid, ip_address)
         )
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type='container_storage').inc()
         logger.error(f"Error storing container in database: {str(e)}")
         return False
 
+# Get connection pool stats
+# Replace the get_connection_pool_stats function in database.py with this fixed version
 # Get connection pool stats
 def get_connection_pool_stats():
     """Get statistics about the connection pool"""
@@ -530,17 +585,51 @@ def get_connection_pool_stats():
             "max_connections": 0
         }
     
-    return {
-        "status": "active",
-        "used_connections": pg_pool.used,
-        "free_connections": pg_pool.numconn - pg_pool.used,
-        "max_connections": pg_pool.maxconn
-    }
-
+    try:
+        # The actual attributes in psycopg2.pool.ThreadedConnectionPool
+        minconn = pg_pool.minconn
+        maxconn = pg_pool.maxconn
+        
+        # Try to get free connections count if possible
+        free_connections = 0
+        try:
+            if hasattr(pg_pool, '_pool'):
+                free_connections = len(pg_pool._pool)
+        except:
+            pass
+            
+        # Try to get used connections count if possible
+        used_connections = 0
+        try:
+            if hasattr(pg_pool, '_used'):
+                used_connections = len(pg_pool._used)
+        except:
+            pass
+        
+        stats = {
+            "status": "active",
+            "used_connections": used_connections,
+            "free_connections": free_connections,
+            "min_connections": minconn,
+            "max_connections": maxconn
+        }
+        
+        return stats
+    except Exception as e:
+        logger.error(f"Failed to get connection pool stats: {str(e)}")
+        # Return a basic response even if there's an error
+        return {
+            "status": "error",
+            "message": str(e),
+            "min_connections": 5,  # Default values from init_db_pool
+            "max_connections": 20
+        }
 # Periodic cleanup task for port allocations
 def perform_maintenance():
     """Perform maintenance tasks like cleaning up stale ports"""
     try:
         cleanup_stale_port_allocations()
     except Exception as e:
+        # Record error for metrics
+        metrics.ERRORS_TOTAL.labels(error_type='maintenance').inc()
         logger.error(f"Error during maintenance routine: {str(e)}")
