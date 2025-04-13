@@ -73,6 +73,7 @@ ADD_TIME = get_env_or_fail('ADD_TIME', int)
 # Container image and identification
 IMAGES_NAME = get_env_or_fail('IMAGES_NAME')
 FLAG = get_env_or_fail('FLAG')
+COMPOSE_PROJECT_NAME = get_env_or_fail('COMPOSE_PROJECT_NAME')
 
 # Port configuration
 PORT_IN_CONTAINER = get_env_or_fail('PORT_IN_CONTAINER', int)
@@ -128,6 +129,7 @@ CONTAINER_CHECK_INTERVAL = get_env_or_fail('CONTAINER_CHECK_INTERVAL', int, defa
 PORT_ALLOCATION_MAX_ATTEMPTS = get_env_or_fail('PORT_ALLOCATION_MAX_ATTEMPTS', int, default=5)
 CAPTCHA_TTL = get_env_or_fail('CAPTCHA_TTL', int, default=300)  # 5 minutes
 STALE_PORT_MAX_AGE = get_env_or_fail('STALE_PORT_MAX_AGE', int, default=RATE_LIMIT_WINDOW)  # Default to rate limit window
+
 # Global resource quota settings
 MAX_TOTAL_CONTAINERS = get_env_or_fail('MAX_TOTAL_CONTAINERS', int, default=100)
 MAX_TOTAL_CPU_PERCENT = get_env_or_fail('MAX_TOTAL_CPU_PERCENT', int, default=800)  # 800% = 8 cores fully utilized
@@ -139,6 +141,14 @@ RESOURCE_SOFT_LIMIT_PERCENT = get_env_or_fail('RESOURCE_SOFT_LIMIT_PERCENT', int
 
 # Enable/disable global resource quotas
 ENABLE_RESOURCE_QUOTAS = get_env_or_fail('ENABLE_RESOURCE_QUOTAS', lambda x: x.lower() == 'true', default=True)
+
+# Logging configuration
+ENABLE_LOGS_ENDPOINT = get_env_or_fail('ENABLE_LOGS_ENDPOINT', lambda x: x.lower() == 'true', default=True)
+LOG_BUFFER_SIZE = get_env_or_fail('LOG_BUFFER_SIZE', int, default=5000)  # Max log entries to keep in memory
+
+# Metrics configuration
+METRICS_ENABLED = get_env_or_fail('METRICS_ENABLED', lambda x: x.lower() == 'true', default=True)
+ADMIN_KEY = get_env_or_fail('ADMIN_KEY', default='change_this_to_a_secure_random_value')
 
 # Resource quota validation
 if MAX_TOTAL_CONTAINERS <= 0 or MAX_TOTAL_CPU_PERCENT <= 0 or MAX_TOTAL_MEMORY_GB <= 0:
@@ -155,5 +165,9 @@ if START_RANGE >= STOP_RANGE:
 if LEAVE_TIME <= 0 or ADD_TIME <= 0:
     logger.error(f"LEAVE_TIME ({LEAVE_TIME}) and ADD_TIME ({ADD_TIME}) must be positive")
     sys.exit(1)
+
+# Initialize log buffer
+if ENABLE_LOGS_ENDPOINT:
+    logger.info(f"In-memory log buffer initialized with capacity of {LOG_BUFFER_SIZE} entries")
 
 logger.info("Configuration loaded successfully")

@@ -9,7 +9,8 @@ from config import (
     CONTAINER_MEMORY_LIMIT, CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
     ENABLE_NO_NEW_PRIVILEGES, ENABLE_READ_ONLY, ENABLE_TMPFS, TMPFS_SIZE,
     DROP_ALL_CAPABILITIES, CAP_NET_BIND_SERVICE, CAP_CHOWN,
-    THREAD_POOL_SIZE, CONTAINER_CHECK_INTERVAL
+    THREAD_POOL_SIZE, CONTAINER_CHECK_INTERVAL, COMPOSE_PROJECT_NAME,
+    ENABLE_LOGS_ENDPOINT
 )
 from database import execute_query, remove_container_from_db
 
@@ -48,7 +49,15 @@ monitoring_futures = {}
 __all__ = ['PORT_RANGE', 'client', 'get_free_port', 'auto_remove_container', 'remove_container', 
            'get_container_status', 'get_container_security_options', 
            'get_container_capabilities', 'get_container_tmpfs', 'thread_pool',
-           'monitor_container', 'shutdown_thread_pool']
+           'monitor_container', 'shutdown_thread_pool', 'get_service_container_id',
+           'get_service_logs']
+
+# Define service mappings for core system containers
+SERVICE_MAPPINGS = {
+    'deployer': f"{COMPOSE_PROJECT_NAME}_flask_app",
+    'database': f"{COMPOSE_PROJECT_NAME}-postgres-1",
+    'task_service': f"{COMPOSE_PROJECT_NAME}_local_stub"
+}
 
 # Check if port is free
 def is_port_free(port):
@@ -230,3 +239,112 @@ def shutdown_thread_pool():
     logger.info("Shutting down container monitoring thread pool...")
     thread_pool.shutdown(wait=False)
     logger.info("Thread pool shutdown complete")
+
+# Get container ID for a service name
+def get_service_container_id(service_name):
+    """
+    Get the container ID for a service by name
+
+    Args:
+        service_name: String identifying the service ('deployer', 'database', etc.)
+
+    Returns:
+        Container ID if found, None otherwise
+    """
+    if not ENABLE_LOGS_ENDPOINT:
+        logger.warning("Logs endpoint is disabled in configuration")
+        return None
+
+    try:
+        # Map service name to container name pattern
+        if service_name in SERVICE_MAPPINGS:
+            container_name = SERVICE_MAPPINGS[service_name]
+        else:
+            logger.warning(f"Unknown service name: {service_name}")
+            return None
+
+        # Find container by name
+        containers = client.containers.list(all=True, filters={"name": container_name})
+        
+        if not containers:
+            logger.warning(f"No container found for service {service_name} (looking for {container_name})")
+            return None
+            
+        # Use the first container that matches the name
+        return containers[0].id
+        
+    except Exception as e:
+        logger.error(f"Error getting container ID for service {service_name}: {str(e)}")
+        return None
+
+# Get logs for a service container
+def get_service_logs(service_name, tail=100, since=None, until=None, timestamps=True):
+    """
+    Get logs for a service container
+
+    Args:
+        service_name: String identifying the service ('deployer', 'database', etc.)
+        tail: Number of log lines to return (default 100)
+        since: Unix timestamp for logs since (optional)
+        until: Unix timestamp for logs until (optional)
+        timestamps: Include timestamps in logs (default True)
+
+    Returns:
+        Logs as a string, or None if service not found
+    """
+    if not ENABLE_LOGS_ENDPOINT:
+        logger.warning("Logs endpoint is disabled in configuration")
+        return None
+        
+    try:
+        # Get container ID for service
+        container_id = get_service_container_id(service_name)
+        if not container_id:
+            return None
+            
+        # Get container object
+        container = client.containers.get(container_id)
+        
+        # Get logs with specified parameters
+        logs = container.logs(
+            stdout=True,
+            stderr=True,
+            stream=False,
+            tail=tail,
+            since=since,
+            until=until,
+            timestamps=timestamps
+        )
+        
+        # Convert bytes to string
+        return logs.decode('utf-8', errors='replace')
+        
+    except docker.errors.NotFound:
+        logger.warning(f"Container for service {service_name} not found")
+        return None
+    except Exception as e:
+        logger.error(f"Error getting logs for service {service_name}: {str(e)}")
+        return f"Error retrieving logs: {str(e)}"
+
+# Get logs for all service containers
+def get_all_service_logs(tail=100, since=None, until=None, timestamps=True):
+    """
+    Get logs for all core service containers
+
+    Args:
+        tail: Number of log lines to return per service (default 100)
+        since: Unix timestamp for logs since (optional)
+        until: Unix timestamp for logs until (optional)
+        timestamps: Include timestamps in logs (default True)
+
+    Returns:
+        Dictionary of service name to logs
+    """
+    logs_by_service = {}
+    
+    for service_name in SERVICE_MAPPINGS.keys():
+        logs = get_service_logs(service_name, tail, since, until, timestamps)
+        if logs:
+            logs_by_service[service_name] = logs
+            
+    return logs_by_service

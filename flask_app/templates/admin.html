@@ -348,7 +348,17 @@
                     <div class="tab-pane fade" id="logs" role="tabpanel" aria-labelledby="logs-tab">
                         <div class="logs-selector">
                             <select id="containerSelector" class="form-select">
-                                <option value="">All Containers</option>
+                                <option value="">All User Containers</option>
+                                <option value="all">All Logs (Services + Containers)</option>
+                                <optgroup label="System Services">
+                                    <option value="deployer">Deployer Service</option>
+                                    <option value="database">Database Service</option>
+                                    <option value="task_service">Task Service</option>
+                                    <option value="all_services">All Services</option>
+                                </optgroup>
+                                <optgroup label="User Containers" id="userContainerOptions">
+                                    <!-- User containers will be populated here -->
+                                </optgroup>
                             </select>
                             <button id="refreshLogs" class="btn btn-primary ms-2">Refresh</button>
                             <select id="logLines" class="form-select ms-2" style="width: 120px;">
@@ -362,7 +372,7 @@
                             <div class="loading-spinner"></div>
                             <p class="mt-2">Loading logs...</p>
                         </div>
-                        <pre id="logsOutput">Select a container and click "Refresh" to view logs.</pre>
+                        <pre id="logsOutput">Select a container or service and click "Refresh" to view logs.</pre>
                     </div>
                     
                     <!-- Metrics Tab -->
@@ -751,9 +761,10 @@
     
     // Update container selector for logs
     function updateContainerSelector(containers) {
-        // Clear existing options except the "All Containers" option
-        while (containerSelector.options.length > 1) {
-            containerSelector.remove(1);
+        // Clear existing options in user containers group
+        const userContainerOptions = document.getElementById('userContainerOptions');
+        while (userContainerOptions.children.length > 0) {
+            userContainerOptions.removeChild(userContainerOptions.children[0]);
         }
         
         // Add container options
@@ -762,11 +773,10 @@
                 const option = document.createElement('option');
                 option.value = container.full_id;
                 option.text = `${container.id} (Port ${container.port})`;
-                containerSelector.appendChild(option);
+                userContainerOptions.appendChild(option);
             });
         }
-    }
-    
+    }    
     // Load logs for selected container
     function loadLogs() {
         const containerId = containerSelector.value;
@@ -814,6 +824,18 @@
         // Load logs
         loadLogs();
     }
+
+    // View logs for a specific service
+    function viewServiceLogs(serviceName) {
+        // Select the service in the dropdown
+        containerSelector.value = serviceName;
+        
+        // Switch to logs tab
+        document.getElementById('logs-tab').click();
+        
+        // Load logs
+        loadLogs();
+    }
     
     // Load metrics
     function loadMetrics() {
@@ -841,9 +863,25 @@
             });
     }
     
-    // Highlight log keywords
+    // Enhanced log highlighting with new patterns for services
     function highlightLogs(element) {
         let html = element.textContent;
+        
+        // Highlight service section headers
+        html = html.replace(/===== (Service|Container): ([^=]+) =====/g, 
+                            '<span style="color: #33ccff; font-weight: bold;">===== $1: $2 =====</span>');
+        
+        // Highlight postgres log lines
+        html = html.replace(/^postgres-\d+\s+\|\s+(.+?)$/gm, 
+                            '<span style="color: #cc99ff;">postgres-1 | $1</span>');
+        
+        // Highlight flask_app log lines
+        html = html.replace(/^button_clicker_flask_app\s+\|\s+(.+?)$/gm, 
+                            '<span style="color: #66cc99;">button_clicker_flask_app | $1</span>');
+        
+        // Highlight local_stub log lines
+        html = html.replace(/^button_clicker_local_stub\s+\|\s+(.+?)$/gm, 
+                            '<span style="color: #ff9966;">button_clicker_local_stub | $1</span>');
         
         // Highlight error, warning, info, and success messages
         html = html.replace(/\b(ERROR|ERRO|FATAL|EXCEPTION|FAILURE)\b/gi, '<span class="error">$1</span>');
@@ -851,9 +889,16 @@
         html = html.replace(/\b(INFO|INFORMATION)\b/gi, '<span class="info">$1</span>');
         html = html.replace(/\b(SUCCESS|SUCCESSFUL)\b/gi, '<span class="success">$1</span>');
         
+        // Highlight timestamps in brackets
+        html = html.replace(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}/g, 
+                            '<span style="color: #aaaaaa;">$&</span>');
+        
+        // Highlight UTC timestamps
+        html = html.replace(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} UTC/g, 
+                            '<span style="color: #aaaaaa;">$&</span>');
+        
         element.innerHTML = html;
-    }
-    
+    }    
     // Format seconds to human-readable time
     function formatSeconds(seconds) {
         // Hours

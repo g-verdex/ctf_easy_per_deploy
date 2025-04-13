@@ -18,14 +18,16 @@ from docker_utils import (
     get_container_status, 
     get_container_security_options, 
     get_container_capabilities, 
-    get_container_tmpfs
+    get_container_tmpfs,
+    get_service_logs,
+    get_all_service_logs
 )
 from config import (
     IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
     CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
     CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
     ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW,
-    NETWORK_NAME, BYPASS_CAPTCHA, MAINTENANCE_INTERVAL, ENABLE_RESOURCE_QUOTAS, DB_HOST, DB_NAME
+    NETWORK_NAME, BYPASS_CAPTCHA, MAINTENANCE_INTERVAL, ENABLE_RESOURCE_QUOTAS, DB_HOST, DB_NAME, ENABLE_LOGS_ENDPOINT
 )
 from captcha import create_captcha, validate_captcha
 import resource_monitor
@@ -745,23 +747,31 @@ def metrics_endpoint():
 
 @app.route('/logs')
 def logs_endpoint():
-    """Endpoint to retrieve logs from containers
+    """Enhanced logs endpoint that provides access to user containers and service logs
     
     Parameters:
-    - container_id: Optional container ID to get logs for a specific container
+    - container_id: Container ID to get logs for, special values include:
+        - "deployer" - For flask_app logs
+        - "database" - For postgres logs
+        - "task_service" - For generic_task logs
+        - "all_services" - For all service logs
+        - empty/not specified - For all user containers
     - tail: Number of lines to retrieve (default: 100)
     - since: Timestamp to fetch logs since (in seconds since epoch)
     - admin_key: Admin key for authentication from non-localhost
     - format: Output format ('json' or 'text', default: 'json')
     """
     try:
+        # Check if logs endpoint is enabled
+        if not ENABLE_LOGS_ENDPOINT:
+            return jsonify({"error": "Logs endpoint is disabled"}), 404
+        
         # Check authorization
         is_authorized, error_message = check_admin_auth(request)
         if not is_authorized:
             logger.warning(f"Unauthorized logs access attempt from {request.remote_addr}")
             return jsonify({"error": error_message}), 403
         
-        # Rest of the logs endpoint logic remains unchanged
         # Get request parameters
         container_id = request.args.get('container_id', None)
         tail = request.args.get('tail', '100')
@@ -776,7 +786,7 @@ def logs_endpoint():
         except (ValueError, TypeError):
             tail = 100
         
-        # Convert since parameter to Docker timestamp (seconds or nanoseconds)
+        # Convert since parameter to timestamp
         since_timestamp = None
         if since:
             try:
@@ -784,7 +794,118 @@ def logs_endpoint():
             except (ValueError, TypeError):
                 return jsonify({"error": "Invalid 'since' parameter. Expected Unix timestamp (seconds)"}), 400
         
-        # Get logs for specified container or all containers owned by this instance
+        # Check if request is for a service container
+        service_containers = ['deployer', 'database', 'task_service', 'all_services']
+        
+        if container_id in service_containers:
+            return handle_service_logs(container_id, tail, since_timestamp, output_format)
+        elif container_id and container_id.lower() == "all":
+            return handle_all_logs(tail, since_timestamp, output_format)
+        else:
+            return handle_user_container_logs(container_id, tail, since_timestamp, output_format)
+    
+    except Exception as e:
+        logger.error(f"Unhandled error in logs endpoint: {str(e)}")
+        metrics.ERRORS_TOTAL.labels(error_type='logs_endpoint').inc()
+        return jsonify({"error": "Internal server error"}), 500
+
+def handle_service_logs(service_id, tail, since_timestamp, output_format):
+    """Handle logs for service containers"""
+    try:
+        # Special handling for all_services
+        if service_id == 'all_services':
+            # Get logs for all services
+            logs_by_service = get_all_service_logs(tail, since_timestamp)
+            
+            if output_format == 'text':
+                # Format as text with service headers
+                text_output = ""
+                for service_name, logs in logs_by_service.items():
+                    text_output += f"\n===== Service: {service_name} =====\n"
+                    text_output += logs
+                    text_output += "\n\n"
+                
+                return text_output, 200, {'Content-Type': 'text/plain'}
+            else:
+                # Return as JSON
+                return jsonify({
+                    "services": logs_by_service
+                })
+        else:
+            # Get logs for specific service
+            logs = get_service_logs(service_id, tail, since_timestamp)
+            
+            if logs is None:
+                return jsonify({"error": f"Service '{service_id}' not found or logs unavailable"}), 404
+                
+            if output_format == 'text':
+                return logs, 200, {'Content-Type': 'text/plain'}
+            else:
+                return jsonify({
+                    "service": service_id,
+                    "logs": logs.splitlines() if logs else []
+                })
+    except Exception as e:
+        logger.error(f"Error handling service logs: {str(e)}")
+        return jsonify({"error": f"Failed to retrieve service logs: {str(e)}"}), 500
+
+def handle_all_logs(tail, since_timestamp, output_format):
+    """Handle logs for all containers and services"""
+    try:
+        # Get service logs
+        service_logs = get_all_service_logs(tail, since_timestamp)
+        
+        # Get user container logs
+        user_container_logs = {}
+        containers = execute_query("SELECT id FROM containers")
+        
+        for container_data in containers:
+            container_id = container_data[0]
+            try:
+                container = client.containers.get(container_id)
+                log_data = container.logs(
+                    tail=tail,
+                    since=since_timestamp,
+                    timestamps=True
+                ).decode('utf-8', errors='replace')
+                
+                user_container_logs[container_id] = log_data.splitlines() if output_format == 'json' else log_data
+            except docker.errors.NotFound:
+                user_container_logs[container_id] = ["Container not found in Docker"]
+            except Exception as e:
+                user_container_logs[container_id] = [f"Error retrieving logs: {str(e)}"]
+        
+        # Combine results
+        if output_format == 'text':
+            text_output = ""
+            
+            # Add service logs
+            for service_name, logs in service_logs.items():
+                text_output += f"\n===== Service: {service_name} =====\n"
+                text_output += logs
+                text_output += "\n\n"
+            
+            # Add user container logs
+            for container_id, logs in user_container_logs.items():
+                text_output += f"\n===== User Container: {container_id} =====\n"
+                text_output += logs if isinstance(logs, str) else "\n".join(logs)
+                text_output += "\n\n"
+            
+            return text_output, 200, {'Content-Type': 'text/plain'}
+        else:
+            # Return as JSON
+            return jsonify({
+                "services": service_logs,
+                "containers": user_container_logs
+            })
+    except Exception as e:
+        logger.error(f"Error handling all logs: {str(e)}")
+        return jsonify({"error": f"Failed to retrieve logs: {str(e)}"}), 500
+
+def handle_user_container_logs(container_id, tail, since_timestamp, output_format):
+    """Handle logs for user containers (original functionality)"""
+    try:
+        # Handle specific container
         if container_id:
             # Check if container exists in our database
             container_data = execute_query(
@@ -818,7 +939,7 @@ def logs_endpoint():
                 logger.error(f"Error getting logs for container {container_id}: {str(e)}")
                 return jsonify({"error": f"Failed to get logs: {str(e)}"}), 500
         else:
-            # Get all containers managed by this deployer
+            # Get all user containers
             try:
                 containers = execute_query("SELECT id FROM containers")
                 
@@ -862,8 +983,6 @@ def logs_endpoint():
             except Exception as e:
                 logger.error(f"Error retrieving container logs: {str(e)}")
                 return jsonify({"error": f"Failed to retrieve logs: {str(e)}"}), 500
-    
     except Exception as e:
-        logger.error(f"Unhandled error in logs endpoint: {str(e)}")
-        metrics.ERRORS_TOTAL.labels(error_type='logs_endpoint').inc()
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"Error handling user container logs: {str(e)}")
+        return jsonify({"error": f"Failed to retrieve logs: {str(e)}"}), 500
