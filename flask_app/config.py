@@ -47,16 +47,22 @@ if not env_loaded:
         logger.info("Found all critical environment variables in the environment")
         env_loaded = True
 
-# Helper function to get required environment variables
-def get_env_or_fail(var_name, convert_func=str):
-    """Get environment variable or fail if it doesn't exist or conversion fails"""
+# Helper function to get required environment variables with default fallback
+def get_env_or_fail(var_name, convert_func=str, default=None):
+    """Get environment variable or use default if provided, fail if not set and no default"""
     value = os.getenv(var_name)
     if value is None:
+        if default is not None:
+            logger.warning(f"Environment variable {var_name} not set, using default: {default}")
+            return default
         logger.error(f"Required environment variable {var_name} is not set")
         sys.exit(1)
     try:
         return convert_func(value)
     except Exception as e:
+        if default is not None:
+            logger.warning(f"Failed to convert {var_name} value '{value}': {str(e)}. Using default: {default}")
+            return default
         logger.error(f"Failed to convert {var_name} value '{value}': {str(e)}")
         sys.exit(1)
 
@@ -114,6 +120,14 @@ RATE_LIMIT_WINDOW = get_env_or_fail('RATE_LIMIT_WINDOW', int)
 # Testing/Debugging settings
 DEBUG_MODE = get_env_or_fail('DEBUG_MODE', lambda x: x.lower() == 'true')
 BYPASS_CAPTCHA = get_env_or_fail('BYPASS_CAPTCHA', lambda x: x.lower() == 'true')
+
+# New configuration values with defaults (previously hardcoded)
+THREAD_POOL_SIZE = get_env_or_fail('THREAD_POOL_SIZE', int, default=50)
+MAINTENANCE_INTERVAL = get_env_or_fail('MAINTENANCE_INTERVAL', int, default=300)  # 5 minutes
+CONTAINER_CHECK_INTERVAL = get_env_or_fail('CONTAINER_CHECK_INTERVAL', int, default=30)  # 30 seconds
+PORT_ALLOCATION_MAX_ATTEMPTS = get_env_or_fail('PORT_ALLOCATION_MAX_ATTEMPTS', int, default=5)
+CAPTCHA_TTL = get_env_or_fail('CAPTCHA_TTL', int, default=300)  # 5 minutes
+STALE_PORT_MAX_AGE = get_env_or_fail('STALE_PORT_MAX_AGE', int, default=RATE_LIMIT_WINDOW)  # Default to rate limit window
 
 # Validation checks
 if START_RANGE >= STOP_RANGE:

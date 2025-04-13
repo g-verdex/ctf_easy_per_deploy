@@ -2,12 +2,14 @@ import docker
 import time
 import threading
 import logging
+import concurrent.futures
 from config import (
-    # Import only basic variables, not complex objects
+    # Import configuration variables
     PORT_IN_CONTAINER, START_RANGE, STOP_RANGE, 
     CONTAINER_MEMORY_LIMIT, CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
     ENABLE_NO_NEW_PRIVILEGES, ENABLE_READ_ONLY, ENABLE_TMPFS, TMPFS_SIZE,
-    DROP_ALL_CAPABILITIES, CAP_NET_BIND_SERVICE, CAP_CHOWN
+    DROP_ALL_CAPABILITIES, CAP_NET_BIND_SERVICE, CAP_CHOWN,
+    THREAD_POOL_SIZE, CONTAINER_CHECK_INTERVAL
 )
 from database import execute_query, remove_container_from_db
 
@@ -35,13 +37,18 @@ except Exception as e:
     logger.error(f"Error initializing Docker client: {str(e)}")
     raise RuntimeError(f"Failed to connect to Docker daemon: {str(e)}")
 
-# Set to track used ports
-used_ports = set()
+# Create a thread pool for container monitoring with a configurable maximum size
+thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE)
+logger.info(f"Thread pool initialized with max_workers={THREAD_POOL_SIZE}")
+
+# Track futures from the thread pool to manage them if needed
+monitoring_futures = {}
 
 # Export PORT_RANGE to be accessible to other modules
 __all__ = ['PORT_RANGE', 'client', 'get_free_port', 'auto_remove_container', 'remove_container', 
            'get_container_status', 'get_container_security_options', 
-           'get_container_capabilities', 'get_container_tmpfs']
+           'get_container_capabilities', 'get_container_tmpfs', 'thread_pool',
+           'monitor_container', 'shutdown_thread_pool']
 
 # Check if port is free
 def is_port_free(port):
@@ -56,7 +63,7 @@ def is_port_free(port):
         logger.error(f"Error checking if port {port} is free: {str(e)}")
         return False
 
-# Get a free port
+# Get a free port - Note: This will be replaced by database-backed port allocation
 def get_free_port():
     try:
         # Verify we have a valid PORT_RANGE
@@ -65,7 +72,7 @@ def get_free_port():
             return None
         
         # Get available ports
-        available_ports = list(set(PORT_RANGE) - used_ports)
+        available_ports = list(set(PORT_RANGE))
         logger.debug(f"Found {len(available_ports)} potentially available ports")
         
         if not available_ports:
@@ -75,7 +82,6 @@ def get_free_port():
         # Try each port until we find a free one
         for port in available_ports:
             if is_port_free(port):
-                used_ports.add(port)
                 logger.info(f"Allocated port {port}")
                 return port
         
@@ -98,14 +104,16 @@ def remove_container(container_id, port):
     except Exception as e:
         logger.error(f"Failed to remove container {container_id}: {str(e)}")
 
-    # Always remove port from used_ports set and from database regardless of removal status
-    used_ports.discard(port)
+    # Always release the port and remove from database regardless of removal status
     try:
-        # Use execute_insert here to avoid trying to fetch results
+        # Remove container from database and release port
+        from database import release_port
         remove_container_from_db(container_id)
-        logger.info(f"Container {container_id} removed from database.")
+        if port:
+            release_port(port)
+        logger.info(f"Container {container_id} removed from database and port {port} released.")
     except Exception as e:
-        logger.error(f"Failed to remove container {container_id} from database: {str(e)}")
+        logger.error(f"Failed to clean up container {container_id} from database: {str(e)}")
 
 # Automatically remove container after expiration time
 def auto_remove_container(container_id, port):
@@ -123,14 +131,33 @@ def auto_remove_container(container_id, port):
             if time_to_wait <= 0:
                 break  # Time expired - remove container
 
-            logger.debug(f"Container {container_id} will be checked again in 30 sec. Time left: {time_to_wait}s")
-            time.sleep(min(time_to_wait, 30))  # Check every 30 seconds or until time expires
+            logger.debug(f"Container {container_id} will be checked again in {CONTAINER_CHECK_INTERVAL} sec. Time left: {time_to_wait}s")
+            time.sleep(min(time_to_wait, CONTAINER_CHECK_INTERVAL))  # Use configurable check interval
 
         logger.info(f"Removing container {container_id} due to expiration.")
         remove_container(container_id, port)
 
     except Exception as e:
         logger.error(f"Unexpected error in auto_remove_container: {str(e)}")
+
+# Submit container for monitoring to the thread pool instead of creating a new thread
+def monitor_container(container_id, port):
+    """Submit a container to the thread pool for monitoring"""
+    try:
+        # Cancel any existing monitoring task for this container
+        if container_id in monitoring_futures and not monitoring_futures[container_id].done():
+            monitoring_futures[container_id].cancel()
+            logger.info(f"Cancelled existing monitoring task for container {container_id}")
+        
+        # Submit new monitoring task
+        future = thread_pool.submit(auto_remove_container, container_id, port)
+        monitoring_futures[container_id] = future
+        logger.info(f"Container {container_id} submitted to monitoring thread pool")
+        return future
+    except Exception as e:
+        logger.error(f"Error submitting container {container_id} to thread pool: {str(e)}")
+        # Fallback to direct execution if thread pool fails
+        auto_remove_container(container_id, port)
 
 # Get container status
 def get_container_status(container_id):
@@ -196,3 +223,10 @@ def get_container_tmpfs():
     except Exception as e:
         logger.error(f"Error configuring tmpfs: {str(e)}")
         return None
+
+# Cleanup function for the thread pool on application shutdown
+def shutdown_thread_pool():
+    """Shutdown the thread pool gracefully"""
+    logger.info("Shutting down container monitoring thread pool...")
+    thread_pool.shutdown(wait=False)
+    logger.info("Thread pool shutdown complete")

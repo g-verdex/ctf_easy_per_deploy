@@ -4,7 +4,11 @@ import os
 import time
 import logging
 import random
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+from config import (
+    DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, 
+    START_RANGE, STOP_RANGE, RATE_LIMIT_WINDOW, MAX_CONTAINERS_PER_HOUR,
+    PORT_ALLOCATION_MAX_ATTEMPTS, STALE_PORT_MAX_AGE
+)
 
 # Setup logging
 logger = logging.getLogger('ctf-deployer')
@@ -57,6 +61,16 @@ def init_db():
                         PRIMARY KEY (ip_address, request_time)
                     )
                 """)
+
+                # Create port allocation table to prevent race conditions
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS port_allocations (
+                        port INTEGER PRIMARY KEY,
+                        allocated BOOLEAN NOT NULL DEFAULT FALSE,
+                        container_id TEXT NULL,
+                        allocated_time BIGINT NULL
+                    )
+                """)
                 
                 # Add useful indexes
                 cursor.execute("""
@@ -73,6 +87,30 @@ def init_db():
                     CREATE INDEX IF NOT EXISTS idx_ip_requests_time
                     ON ip_requests (request_time)
                 """)
+                
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_port_allocations_allocated
+                    ON port_allocations (allocated)
+                """)
+                
+                # Initialize port_allocations table if empty
+                cursor.execute("SELECT COUNT(*) FROM port_allocations")
+                count = cursor.fetchone()[0]
+                
+                if count == 0:
+                    logger.info("Initializing port allocation table...")
+                    # Create batch insert for better performance
+                    ports_data = [(port,) for port in range(START_RANGE, STOP_RANGE)]
+                    
+                    # Insert in batches of 1000 to avoid memory issues
+                    batch_size = 1000
+                    for i in range(0, len(ports_data), batch_size):
+                        batch = ports_data[i:i+batch_size]
+                        args_str = ','.join(cursor.mogrify("(%s)", x).decode('utf-8') 
+                                           for x in batch)
+                        cursor.execute(f"INSERT INTO port_allocations (port) VALUES {args_str}")
+                        
+                    logger.info(f"Initialized {len(ports_data)} ports in allocation table")
                 
                 conn.commit()
                 logger.info("Database schema initialized successfully")
@@ -177,8 +215,200 @@ def execute_insert(query, params=()):
         if conn:
             release_connection(conn)
 
+# New function to allocate a port atomically from the database
+def allocate_port(container_id=None):
+    """
+    Allocate a port from the database with proper locking to prevent race conditions
+    
+    Args:
+        container_id: Optional container ID to associate with the port
+        
+    Returns:
+        Allocated port number or None if allocation fails
+    """
+    conn = None
+    attempt = 0
+    max_attempts = PORT_ALLOCATION_MAX_ATTEMPTS
+    
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            conn = get_connection()
+            # Start a transaction
+            conn.autocommit = False
+            
+            with conn.cursor() as cursor:
+                # Get a free port with FOR UPDATE to lock the row
+                cursor.execute("""
+                    SELECT port 
+                    FROM port_allocations 
+                    WHERE allocated = FALSE 
+                    ORDER BY port 
+                    LIMIT 1 
+                    FOR UPDATE SKIP LOCKED
+                """)
+                
+                result = cursor.fetchone()
+                if not result:
+                    # No free ports available
+                    conn.rollback()
+                    logger.warning(f"No free ports available (attempt {attempt}/{max_attempts})")
+                    time.sleep(0.5)  # Wait before retry
+                    continue
+                
+                port = result[0]
+                current_time = int(time.time())
+                
+                # Mark port as allocated
+                cursor.execute("""
+                    UPDATE port_allocations 
+                    SET allocated = TRUE, 
+                        container_id = %s, 
+                        allocated_time = %s 
+                    WHERE port = %s
+                """, (container_id, current_time, port))
+                
+                # Commit the transaction
+                conn.commit()
+                logger.info(f"Successfully allocated port {port} for container {container_id}")
+                return port
+                
+        except Exception as e:
+            logger.error(f"Error allocating port (attempt {attempt}/{max_attempts}): {str(e)}")
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            # Wait with exponential backoff before retry
+            time.sleep(0.5 * (2 ** (attempt - 1)))
+        finally:
+            if conn:
+                conn.autocommit = True
+                release_connection(conn)
+    
+    logger.error(f"Failed to allocate port after {max_attempts} attempts")
+    return None
+
+# Release a port back to the pool
+def release_port(port):
+    """
+    Release an allocated port back to the pool
+    
+    Args:
+        port: The port number to release
+    
+    Returns:
+        Boolean indicating success
+    """
+    if not port:
+        return False
+        
+    conn = None
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE port_allocations 
+                SET allocated = FALSE, 
+                    container_id = NULL, 
+                    allocated_time = NULL 
+                WHERE port = %s
+            """, (port,))
+            conn.commit()
+            logger.info(f"Released port {port} back to the pool")
+            return True
+    except Exception as e:
+        logger.error(f"Error releasing port {port}: {str(e)}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return False
+    finally:
+        if conn:
+            release_connection(conn)
+
+# Function to check if a port is already allocated
+def is_port_allocated(port):
+    """
+    Check if a port is already allocated in the database
+    
+    Args:
+        port: The port number to check
+        
+    Returns:
+        Boolean indicating if the port is allocated
+    """
+    try:
+        result = execute_query(
+            "SELECT allocated FROM port_allocations WHERE port = %s",
+            (port,),
+            fetchone=True
+        )
+        
+        if not result:
+            logger.warning(f"Port {port} not found in allocation table")
+            return False
+            
+        return result[0]
+    except Exception as e:
+        logger.error(f"Error checking port {port} allocation: {str(e)}")
+        return False
+
+# Function to clean up stale port allocations
+def cleanup_stale_port_allocations():
+    """
+    Clean up stale port allocations that might have been abandoned
+    """
+    try:
+        current_time = int(time.time())
+        max_age_seconds = STALE_PORT_MAX_AGE
+        cutoff_time = current_time - max_age_seconds
+        
+        # Find ports allocated before the cutoff time with no matching container
+        stale_ports = execute_query("""
+            SELECT p.port 
+            FROM port_allocations p
+            LEFT JOIN containers c ON p.container_id = c.id
+            WHERE p.allocated = TRUE 
+              AND p.allocated_time < %s
+              AND c.id IS NULL
+        """, (cutoff_time,))
+        
+        if not stale_ports:
+            return
+            
+        logger.info(f"Found {len(stale_ports)} stale port allocations")
+        
+        # Release each stale port
+        for port_record in stale_ports:
+            port = port_record[0]
+            logger.info(f"Releasing stale port allocation: {port}")
+            release_port(port)
+            
+    except Exception as e:
+        logger.error(f"Error cleaning up stale port allocations: {str(e)}")
+
 # Remove container from DB
 def remove_container_from_db(container_id):
+    # Get the port before deleting the container
+    try:
+        container_data = execute_query(
+            "SELECT port FROM containers WHERE id = %s", 
+            (container_id,), 
+            fetchone=True
+        )
+        
+        if container_data:
+            port = container_data[0]
+            # Release port allocation
+            release_port(port)
+    except Exception as e:
+        logger.error(f"Error retrieving port for container {container_id}: {str(e)}")
+    
+    # Delete the container record
     execute_insert("DELETE FROM containers WHERE id = %s", (container_id,))
 
 # Record IP request for rate limiting with better efficiency
@@ -202,19 +432,25 @@ def record_ip_request(ip_address):
         logger.error(f"Error recording IP request: {str(e)}")
         return False
 
-# Improved check for IP rate limiting
-def check_ip_rate_limit(ip_address, time_window=3600, max_requests=5):
+# Improved check for IP rate limiting without hardcoded values
+def check_ip_rate_limit(ip_address, time_window=None, max_requests=None):
     """
     Check if an IP has made too many container requests within a time window
     
     Args:
         ip_address: The IP address to check
-        time_window: Time window in seconds (default: 1 hour)
-        max_requests: Maximum allowed requests in the time window
+        time_window: Time window in seconds (defaults to RATE_LIMIT_WINDOW)
+        max_requests: Maximum allowed requests in the time window (defaults to MAX_CONTAINERS_PER_HOUR)
         
     Returns:
         Boolean: True if rate limit exceeded, False otherwise
     """
+    # Use configuration values if not specified
+    if time_window is None:
+        time_window = RATE_LIMIT_WINDOW
+    if max_requests is None:
+        max_requests = MAX_CONTAINERS_PER_HOUR
+    
     try:
         if not ip_address or ip_address == "127.0.0.1":
             # Skip rate limiting for localhost
@@ -282,3 +518,29 @@ def store_container(container_id, port, user_uuid, ip_address, expiration_time):
     except Exception as e:
         logger.error(f"Error storing container in database: {str(e)}")
         return False
+
+# Get connection pool stats
+def get_connection_pool_stats():
+    """Get statistics about the connection pool"""
+    if pg_pool is None:
+        return {
+            "status": "not_initialized",
+            "used_connections": 0,
+            "free_connections": 0,
+            "max_connections": 0
+        }
+    
+    return {
+        "status": "active",
+        "used_connections": pg_pool.used,
+        "free_connections": pg_pool.numconn - pg_pool.used,
+        "max_connections": pg_pool.maxconn
+    }
+
+# Periodic cleanup task for port allocations
+def perform_maintenance():
+    """Perform maintenance tasks like cleaning up stale ports"""
+    try:
+        cleanup_stale_port_allocations()
+    except Exception as e:
+        logger.error(f"Error during maintenance routine: {str(e)}")

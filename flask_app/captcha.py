@@ -4,11 +4,10 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 import hashlib
 import time
+from config import CAPTCHA_TTL
 
 # Cache to store captcha data with expiration
 captcha_cache = {}
-# TTL for captcha entries (5 minutes)
-CAPTCHA_TTL = 300
 
 def generate_math_problem():
     """Generate a simple math problem."""

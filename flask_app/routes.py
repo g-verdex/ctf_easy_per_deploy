@@ -8,25 +8,25 @@ import os
 from datetime import datetime
 from database import (
     execute_query, record_ip_request, check_ip_rate_limit, 
-    get_container_by_uuid, store_container, remove_container_from_db
+    get_container_by_uuid, store_container, remove_container_from_db,
+    allocate_port, release_port, get_connection_pool_stats, perform_maintenance
 )
 from docker_utils import (
-    # Explicitly import PORT_RANGE
-    PORT_RANGE,
-    get_free_port, 
     client, 
-    auto_remove_container, 
+    monitor_container,  # Updated to use thread pool instead of direct thread creation
     remove_container, 
     get_container_status, 
     get_container_security_options, 
     get_container_capabilities, 
     get_container_tmpfs
 )
-from config import (IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
-                   CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
-                   CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
-                   ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW,
-                   NETWORK_NAME, BYPASS_CAPTCHA)  # Added BYPASS_CAPTCHA import
+from config import (
+    IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
+    CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
+    CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
+    ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW,
+    NETWORK_NAME, BYPASS_CAPTCHA, MAINTENANCE_INTERVAL
+)
 from captcha import create_captcha, validate_captcha
 
 app = Flask(__name__)
@@ -38,6 +38,38 @@ logger = logging.getLogger('ctf-deployer')
 
 # Define cookie name
 COOKIE_NAME = 'user_uuid'
+
+# Maintenance thread reference
+maintenance_thread = None
+
+# Create a periodic maintenance timer for cleanup operations
+def start_maintenance_timer(interval=None):
+    """
+    Start a periodic maintenance timer for cleanup operations
+    
+    Args:
+        interval: Interval in seconds between maintenance runs (defaults to MAINTENANCE_INTERVAL)
+    
+    Returns:
+        The maintenance thread object
+    """
+    if interval is None:
+        interval = MAINTENANCE_INTERVAL
+        
+    def maintenance_task():
+        while True:
+            try:
+                logger.info("Running scheduled maintenance tasks...")
+                perform_maintenance()
+                logger.info("Scheduled maintenance completed")
+            except Exception as e:
+                logger.error(f"Error during scheduled maintenance: {str(e)}")
+            time.sleep(interval)
+    
+    thread = threading.Thread(target=maintenance_task, daemon=True)
+    thread.start()
+    logger.info(f"Started maintenance timer with {interval}s interval")
+    return thread
 
 @app.template_filter('to_datetime')
 def to_datetime_filter(timestamp):
@@ -96,8 +128,6 @@ def index():
                                            bypass_captcha=BYPASS_CAPTCHA))
     return response
 
-
-
 @app.route("/get_captcha", methods=["GET"])
 def get_captcha():
     """Generate a new CAPTCHA challenge"""
@@ -106,8 +136,6 @@ def get_captcha():
         "captcha_id": captcha_id,
         "captcha_image": captcha_image
     })
-
-
 
 @app.route("/deploy", methods=["POST"])
 def deploy_container():
@@ -121,10 +149,10 @@ def deploy_container():
         remote_ip = request.remote_addr
         logger.info(f"Deploy request from IP: {remote_ip}, UUID: {user_uuid}")
         
-        # Check if IP has hit rate limits - USE CONFIG VALUES INSTEAD OF HARDCODED
+        # Check if IP has hit rate limits - using config values
         try:
-            # Use the values from config instead of hardcoded values
-            if check_ip_rate_limit(remote_ip, time_window=RATE_LIMIT_WINDOW, max_requests=MAX_CONTAINERS_PER_HOUR):
+            # Use the config values directly here
+            if check_ip_rate_limit(remote_ip):
                 logger.warning(f"Rate limit exceeded for IP: {remote_ip}")
                 return jsonify({"error": f"You have reached the maximum number of deployments allowed per hour (limit: {MAX_CONTAINERS_PER_HOUR})."}), 429
         except Exception as e:
@@ -169,26 +197,11 @@ def deploy_container():
             logger.error(f"Error checking existing container: {str(e)}")
             return jsonify({"error": "Error checking for existing containers."}), 500
         
-        # CRITICAL FIX: Check if PORT_RANGE is properly initialized
-        try:
-            # Ensure PORT_RANGE is properly initialized and contains values
-            if not hasattr(PORT_RANGE, '__iter__') or len(list(PORT_RANGE)) == 0:
-                logger.error(f"PORT_RANGE is invalid: {PORT_RANGE}")
-                return jsonify({"error": "Invalid port range configuration."}), 500
-                
-            port = get_free_port()
-            if not port:
-                logger.error("No available ports")
-                return jsonify({"error": "No available ports. Please try again later."}), 400
-            logger.info(f"Assigned port: {port}")
-        except Exception as e:
-            logger.error(f"Error getting free port: {str(e)}")
-            return jsonify({"error": "Error allocating port for container."}), 500
-
-        expiration_time = int(time.time()) + LEAVE_TIME
-        
         # Create a shortened UUID for container naming
         short_uuid = user_uuid.split('-')[0] if '-' in user_uuid else user_uuid[:8]
+        
+        # First create the container to get its ID
+        expiration_time = int(time.time()) + LEAVE_TIME
         
         try:
             # Get security options
@@ -206,7 +219,7 @@ def deploy_container():
             logger.error(f"Error configuring container options: {str(e)}")
             return jsonify({"error": "Error configuring container security options."}), 500
         
-        # Prepare container configuration
+        # Prepare container configuration without port (we'll update it later)
         try:
             # Get the base project name from environment
             base_project_name = os.environ.get('COMPOSE_PROJECT_NAME', 'ctf_task')
@@ -215,6 +228,36 @@ def deploy_container():
             # Replace hyphens with underscores for valid Docker container names
             user_id_part = user_uuid.replace('-', '_')
             container_name = f"{base_project_name}_session_{user_id_part}"
+        except Exception as e:
+            logger.error(f"Error preparing container name: {str(e)}")
+            return jsonify({"error": "Error preparing container configuration."}), 500
+            
+        # Create container without starting it initially
+        try:
+            # Create container with minimal configuration to get an ID
+            container = client.containers.create(
+                image=IMAGES_NAME,
+                hostname=f"ctf-challenge-{short_uuid}",
+                name=container_name,
+                detach=True,
+                environment={'FLAG': FLAG},
+                network=NETWORK_NAME
+            )
+            logger.info(f"Created container skeleton: {container.id} with name: {container_name}")
+            
+            # Now allocate a port in the database with the container ID
+            port = allocate_port(container_id=container.id)
+            if not port:
+                # Clean up container if port allocation fails
+                container.remove(force=True)
+                logger.error("Failed to allocate port from database")
+                return jsonify({"error": "No available ports. Please try again later."}), 503
+                
+            logger.info(f"Allocated port {port} for container {container.id}")
+            
+            # Update container with port mapping and all other settings
+            # Container must be removed and recreated with the new settings
+            container.remove(force=True)
             
             container_config = {
                 'image': IMAGES_NAME,
@@ -229,9 +272,7 @@ def deploy_container():
                 'cpu_quota': int(100000 * CONTAINER_CPU_LIMIT),  # Adjust quota based on CPU limit
                 'pids_limit': CONTAINER_PIDS_LIMIT,
                 'read_only': ENABLE_READ_ONLY,
-                # FIX: Specify the network for proper isolation
                 'network': NETWORK_NAME,
-                # FIX: Specify consistent container naming pattern
                 'name': container_name
             }
             
@@ -244,30 +285,14 @@ def deploy_container():
             if tmpfs:
                 container_config['tmpfs'] = tmpfs
             
-            # Log the container configuration for debugging
-            logger.info(f"Container configuration: {container_config}")
-        except Exception as e:
-            logger.error(f"Error preparing container configuration: {str(e)}")
-            return jsonify({"error": "Error preparing container configuration."}), 500
-        
-        # Create container with configured settings
-        try:
-            # CRITICAL FIX: Verify Docker client is properly initialized
-            if client is None:
-                logger.error("Docker client is not initialized")
-                return jsonify({"error": "Docker client initialization error."}), 500
-                
-            # Check Docker connectivity before attempting to create container
-            try:
-                docker_info = client.info()
-                logger.info(f"Connected to Docker daemon: {docker_info.get('Name')}")
-            except Exception as docker_error:
-                logger.error(f"Failed to connect to Docker daemon: {str(docker_error)}")
-                return jsonify({"error": "Cannot connect to Docker daemon."}), 500
-                
+            # Create and start the new container with all settings
             container = client.containers.run(**container_config)
-            logger.info(f"Created container: {container.id} with name: {container_name}")
+            logger.info(f"Started container: {container.id} with name: {container_name} on port {port}")
+            
         except Exception as e:
+            # If anything fails, make sure to release the port
+            if port:
+                release_port(port)
             logger.error(f"Error creating container: {str(e)}")
             return jsonify({"error": f"Failed to create container: {str(e)}"}), 500
 
@@ -276,16 +301,20 @@ def deploy_container():
             if not record_ip_request(remote_ip):
                 logger.warning(f"Failed to record IP request for {remote_ip}")
             
-            # Store container in database using the new function
+            # Store container in database
             if not store_container(container.id, port, user_uuid, remote_ip, expiration_time):
                 raise Exception("Failed to store container in database")
 
-            threading.Thread(target=auto_remove_container, args=(container.id, port)).start()
+            # Use the thread pool to monitor this container instead of creating a new thread
+            monitor_container(container.id, port)
+            
         except Exception as e:
             logger.error(f"Error recording container in database: {str(e)}")
             # Try to clean up container if database insert fails
             try:
                 container.remove(force=True)
+                if port:
+                    release_port(port)
                 logger.info(f"Removed container {container.id} due to database error")
             except:
                 logger.error(f"Failed to remove container {container.id} after database error")
@@ -379,14 +408,30 @@ def extend_container_lifetime():
 def status():
     """Endpoint to check the status of the deployer service"""
     try:
-        # Make sure we have access to PORT_RANGE from docker_utils
+        # Get database statistics and active containers
         active_containers = execute_query("SELECT COUNT(*) FROM containers", fetchone=True)[0]
+        
+        # Get database connection pool stats
+        pool_stats = get_connection_pool_stats()
+        
+        # Count available ports
+        available_ports = execute_query(
+            "SELECT COUNT(*) FROM port_allocations WHERE allocated = FALSE", 
+            fetchone=True
+        )[0]
+        
         return jsonify({
             "status": "online",
             "active_containers": active_containers,
-            "max_containers": len(list(PORT_RANGE)),
-            "service": "Generic CTF Challenge Deployer"
+            "available_ports": available_ports,
+            "db_connection_pool": pool_stats,
+            "service": "CTF Challenge Deployer"
         })
     except Exception as e:
         logger.error(f"Error in status endpoint: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/health")
+def health_check():
+    """Simple health check endpoint for monitoring systems"""
+    return jsonify({"status": "healthy"})
