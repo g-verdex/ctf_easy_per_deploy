@@ -423,8 +423,8 @@ def deploy_container():
                 if not store_container(container.id, port, user_uuid, remote_ip, expiration_time):
                     raise Exception("Failed to store container in database")
 
-                # Use the thread pool to monitor this container instead of creating a new thread
-                monitor_container(container.id, port)
+                # Container monitoring and cleanup is now handled by the centralized cleanup manager
+                # We no longer start individual monitor threads for each container
                 
                 # Record successful deployment in metrics
                 metrics.CONTAINER_DEPLOYMENTS_TOTAL.inc()

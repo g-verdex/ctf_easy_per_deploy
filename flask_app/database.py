@@ -7,7 +7,7 @@ import random
 from config import (
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, 
     START_RANGE, STOP_RANGE, RATE_LIMIT_WINDOW, MAX_CONTAINERS_PER_HOUR,
-    PORT_ALLOCATION_MAX_ATTEMPTS, STALE_PORT_MAX_AGE
+    PORT_ALLOCATION_MAX_ATTEMPTS, STALE_PORT_MAX_AGE,DB_POOL_MAX,DB_POOL_MIN
 )
 import metrics
 
@@ -21,16 +21,21 @@ pg_pool = None
 def init_db_pool():
     global pg_pool
     try:
+        # Get connection pool sizes from environment variables with defaults
+        min_connections = DB_POOL_MIN  # From config.py
+        max_connections = DB_POOL_MAX  # From config.py
+        
         pg_pool = pool.ThreadedConnectionPool(
-            5,  # Minimum connections
-            20, # Maximum connections
+            min_connections,
+            max_connections,
             host=DB_HOST,
             port=DB_PORT,
             dbname=DB_NAME,
             user=DB_USER,
             password=DB_PASSWORD
         )
-        logger.info(f"Initialized PostgreSQL connection pool to {DB_HOST}:{DB_PORT}/{DB_NAME}")
+        logger.info(f"Initialized PostgreSQL connection pool to {DB_HOST}:{DB_PORT}/{DB_NAME} "
+                   f"with {min_connections}-{max_connections} connections")
     except Exception as e:
         logger.error(f"Failed to initialize PostgreSQL connection pool: {str(e)}")
         raise RuntimeError(f"Database connection error: {str(e)}")
@@ -127,18 +132,33 @@ def get_connection():
         init_db_pool()
     
     try:
-        return pg_pool.getconn()
+        conn = pg_pool.getconn()
+        # Set a statement timeout to prevent hanging queries
+        with conn.cursor() as cursor:
+            cursor.execute("SET statement_timeout = 10000;")  # 10 seconds timeout
+        return conn
     except Exception as e:
         logger.error(f"Failed to get database connection: {str(e)}")
         raise
 
-# Release a connection back to the pool
 def release_connection(conn):
     if pg_pool is not None and conn is not None:
         try:
+            # Reset any transaction that might be in progress
+            try:
+                if conn.info.transaction_status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                    conn.rollback()
+            except:
+                pass
+            
             pg_pool.putconn(conn)
         except Exception as e:
             logger.error(f"Failed to release database connection: {str(e)}")
+            # Try to close it if we can't return it to the pool
+            try:
+                conn.close()
+            except:
+                pass
 
 # Execute a query with retry logic
 def execute_query(query, params=(), fetchone=False, max_retries=3):
@@ -573,57 +593,37 @@ def store_container(container_id, port, user_uuid, ip_address, expiration_time):
         return False
 
 # Get connection pool stats
-# Replace the get_connection_pool_stats function in database.py with this fixed version
-# Get connection pool stats
 def get_connection_pool_stats():
     """Get statistics about the connection pool"""
     if pg_pool is None:
         return {
             "status": "not_initialized",
-            "used_connections": 0,
-            "free_connections": 0,
+            "min_connections": 0,
             "max_connections": 0
         }
     
     try:
-        # The actual attributes in psycopg2.pool.ThreadedConnectionPool
-        minconn = pg_pool.minconn
-        maxconn = pg_pool.maxconn
+        # Only access the documented public attributes
+        minconn = pg_pool.minconn if hasattr(pg_pool, 'minconn') else DB_POOL_MIN
+        maxconn = pg_pool.maxconn if hasattr(pg_pool, 'maxconn') else DB_POOL_MAX
         
-        # Try to get free connections count if possible
-        free_connections = 0
-        try:
-            if hasattr(pg_pool, '_pool'):
-                free_connections = len(pg_pool._pool)
-        except:
-            pass
-            
-        # Try to get used connections count if possible
-        used_connections = 0
-        try:
-            if hasattr(pg_pool, '_used'):
-                used_connections = len(pg_pool._used)
-        except:
-            pass
-        
-        stats = {
+        # Instead of trying to access internal attributes, 
+        # we'll just return the configuration values
+        return {
             "status": "active",
-            "used_connections": used_connections,
-            "free_connections": free_connections,
             "min_connections": minconn,
             "max_connections": maxconn
         }
-        
-        return stats
     except Exception as e:
         logger.error(f"Failed to get connection pool stats: {str(e)}")
-        # Return a basic response even if there's an error
         return {
             "status": "error",
             "message": str(e),
-            "min_connections": 5,  # Default values from init_db_pool
-            "max_connections": 20
+            "min_connections": DB_POOL_MIN,
+            "max_connections": DB_POOL_MAX
         }
+
+
 # Periodic cleanup task for port allocations
 def perform_maintenance():
     """Perform maintenance tasks like cleaning up stale ports"""
