@@ -4,8 +4,8 @@ import uuid
 import time
 
 # Адрес сервера
-# base_url = "http://92.42.96.224:2169"
-base_url = "http://127.0.0.1:2169"
+base_url = "http://92.42.96.224:2169"
+# base_url = "http://127.0.0.1:2169"
 
 # Заголовки для GET и POST запросов
 headers = {
