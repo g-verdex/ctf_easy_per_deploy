@@ -24,12 +24,12 @@ from docker_utils import (
 )
 from config import (
     IMAGES_NAME, LEAVE_TIME, ADD_TIME, FLAG, PORT_IN_CONTAINER, 
-    CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, CONTAINER_MEMORY_LIMIT,
+    CHALLENGE_TITLE, CHALLENGE_DESCRIPTION, COMMAND_CONNECT, CONTAINER_MEMORY_LIMIT,
     CONTAINER_SWAP_LIMIT, CONTAINER_CPU_LIMIT, CONTAINER_PIDS_LIMIT,
     ENABLE_READ_ONLY, MAX_CONTAINERS_PER_HOUR, RATE_LIMIT_WINDOW,
     NETWORK_NAME, BYPASS_CAPTCHA, MAINTENANCE_INTERVAL, ENABLE_RESOURCE_QUOTAS, DB_HOST, DB_NAME, ENABLE_LOGS_ENDPOINT
 )
-from captcha import create_captcha, validate_captcha
+from ctf_captcha import create_captcha, validate_captcha
 import resource_monitor
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 import metrics
@@ -150,6 +150,7 @@ def index():
     
     # Get server hostname for the template
     hostname = request.host.split(':')[0] if ':' in request.host else request.host
+    con_host = COMMAND_CONNECT.replace('<ip>', hostname)
     is_localhost = hostname == '127.0.0.1' or hostname == 'localhost'
 
     # Determine protocol (http by default)
@@ -163,7 +164,7 @@ def index():
         response = make_response(render_template("index.html", 
                                                user_container=None, 
                                                add_minutes=(ADD_TIME // 60),
-                                               hostname=hostname,
+                                               hostname=con_host,
                                                protocol=protocol,
                                                challenge_title=CHALLENGE_TITLE,
                                                challenge_description=CHALLENGE_DESCRIPTION,
@@ -185,12 +186,13 @@ def index():
     container_status = None
     if user_container:
         container_status = get_container_status(user_container[0])
+        con_host = COMMAND_CONNECT.replace('<ip>', hostname).replace('<port>', str(user_container[1]))
     
     response = make_response(render_template("index.html", 
                                            user_container=user_container, 
                                            container_status=container_status,
                                            add_minutes=(ADD_TIME // 60),
-                                           hostname=hostname,
+                                           hostname=con_host,
                                            protocol=protocol,
                                            challenge_title=CHALLENGE_TITLE,
                                            challenge_description=CHALLENGE_DESCRIPTION,
