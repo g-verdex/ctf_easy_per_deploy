@@ -78,6 +78,7 @@ DB_POOL_MAX = get_env_or_fail('DB_POOL_MAX', int)
 # Challenge details
 CHALLENGE_TITLE = get_env_or_fail('CHALLENGE_TITLE')
 CHALLENGE_DESCRIPTION = get_env_or_fail('CHALLENGE_DESCRIPTION')
+COMMAND_CONNECT = get_env_or_fail('COMMAND_CONNECT')
 
 # Resource limits for user containers
 CONTAINER_MEMORY_LIMIT = get_env_or_fail('CONTAINER_MEMORY_LIMIT')
