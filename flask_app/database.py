@@ -263,16 +263,13 @@ def execute_insert(query, params=()):
             release_connection(conn)
 
 # New function to allocate a port atomically from the database
-def allocate_port(container_id=None):
+def allocate_port(container_id=None, blocked_ports=None):
     """
-    Allocate a port from the database with proper locking to prevent race conditions
+    Allocate a port from the database, excluding any ports in `blocked_ports`.
+    """
+    if blocked_ports is None:
+        blocked_ports = []
     
-    Args:
-        container_id: Optional container ID to associate with the port
-        
-    Returns:
-        Allocated port number or None if allocation fails
-    """
     conn = None
     attempt = 0
     max_attempts = PORT_ALLOCATION_MAX_ATTEMPTS
@@ -281,65 +278,66 @@ def allocate_port(container_id=None):
         attempt += 1
         try:
             conn = get_connection()
-            # Start a transaction
             conn.autocommit = False
-            
             with conn.cursor() as cursor:
-                # Get a free port with FOR UPDATE to lock the row
-                cursor.execute("""
-                    SELECT port 
-                    FROM port_allocations 
-                    WHERE allocated = FALSE 
-                    ORDER BY port 
-                    LIMIT 1 
-                    FOR UPDATE SKIP LOCKED
-                """)
+                # Exclude any blocked ports from the SELECT
+                # e.g. "... AND port NOT IN (%s, %s, ...)" if blocked_ports is non-empty
+                exclude_str = ""
+                if blocked_ports:
+                    # Build a string like "AND port NOT IN (7001,7002)"
+                    place_holders = ",".join(["%s"] * len(blocked_ports))
+                    exclude_str = f"AND port NOT IN ({place_holders})"
                 
+                query = f"""
+                    SELECT port
+                    FROM port_allocations
+                    WHERE allocated = FALSE
+                    {exclude_str}
+                    ORDER BY port
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                """
+                
+                params = tuple(blocked_ports)
+                cursor.execute(query, params)
                 result = cursor.fetchone()
                 if not result:
-                    # No free ports available
+                    # No free ports available that aren't blocked
                     conn.rollback()
-                    logger.warning(f"No free ports available (attempt {attempt}/{max_attempts})")
-                    time.sleep(0.5)  # Wait before retry
+                    logger.warning(f"No free (non-blocked) ports available (attempt {attempt}/{max_attempts})")
+                    time.sleep(0.5)
                     continue
                 
                 port = result[0]
                 current_time = int(time.time())
                 
-                # Mark port as allocated
+                # Mark it allocated
                 cursor.execute("""
-                    UPDATE port_allocations 
-                    SET allocated = TRUE, 
-                        container_id = %s, 
-                        allocated_time = %s 
+                    UPDATE port_allocations
+                    SET allocated = TRUE,
+                        container_id = %s,
+                        allocated_time = %s
                     WHERE port = %s
                 """, (container_id, current_time, port))
                 
-                # Commit the transaction
                 conn.commit()
                 logger.info(f"Successfully allocated port {port} for container {container_id}")
                 return port
-                
         except Exception as e:
-            # Increment error counter
             metrics.ERRORS_TOTAL.labels(error_type='port_allocation').inc()
-            
             logger.error(f"Error allocating port (attempt {attempt}/{max_attempts}): {str(e)}")
             if conn:
                 try:
                     conn.rollback()
-                except Exception:
+                except:
                     pass
-            # Wait with exponential backoff before retry
-            time.sleep(0.5 * (2 ** (attempt - 1)))
+            time.sleep(0.5 * (2 ** (attempt - 1)))  # exponential backoff
         finally:
             if conn:
                 conn.autocommit = True
                 release_connection(conn)
     
-    # Record port allocation failure
     metrics.PORT_ALLOCATION_FAILURES.inc()
-    
     logger.error(f"Failed to allocate port after {max_attempts} attempts")
     return None
 
