@@ -57,7 +57,7 @@ fi
 
 # Install dependencies
 echo -e "\n${YELLOW}Installing required packages...${NC}"
-"$VENV_DIR/bin/pip" install psycopg2-binary python-dotenv pytest pytest-cov netifaces requests
+"$VENV_DIR/bin/pip" install psycopg2-binary python-dotenv pytest pytest-cov netifaces requests prometheus_client
 if [ $? -ne 0 ]; then
     echo -e "${RED}Failed to install dependencies in virtual environment.${NC}"
     exit 1
