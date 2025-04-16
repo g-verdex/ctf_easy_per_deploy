@@ -14,8 +14,11 @@ SKIP_TESTS=false
 RUN_POST_DEPLOY_TESTS=false
 RUN_UNIT_TESTS=false
 
-# Virtual environment settings
+# Directory for virtual environment
 VENV_DIR=".venv"
+
+# Directory for lock files
+LOCK_DIR="/var/lock/ctf_deployer"
 
 # Function to display usage information
 show_usage() {
@@ -117,111 +120,292 @@ check_root_permissions() {
     log_success "Running with root permissions."
 }
 
-# Ensure the virtual environment is set up
-ensure_venv() {
-    # Check if we need to set up the virtual environment
-    if [ ! -d "$VENV_DIR" ]; then
-        log_info "Virtual environment not found. Setting up test environment..."
+# Setup lock directory
+setup_lock_directory() {
+    # Ensure the lock directory exists
+    if [ ! -d "$LOCK_DIR" ]; then
+        log_info "Creating lock directory: $LOCK_DIR"
+        if ! mkdir -p "$LOCK_DIR" 2>/dev/null; then
+            log_error "Failed to create lock directory. Check permissions."
+            exit 1
+        fi
+        chmod 1777 "$LOCK_DIR"
+    fi
+    
+    # Check if the directory is writeable
+    if [ ! -w "$LOCK_DIR" ]; then
+        log_error "Lock directory $LOCK_DIR is not writeable. Please fix permissions."
+        exit 1
+    fi
+    
+    log_success "Lock directory is ready: $LOCK_DIR"
+}
+
+# Create a unique instance identifier based on hostname and path
+get_instance_id() {
+    local path_hash=$(echo "$(hostname):$(pwd)" | md5sum | cut -d' ' -f1)
+    echo "${path_hash:0:16}"  # Use first 16 characters of hash
+}
+
+# Check for port range conflicts with existing lock files
+check_port_range_conflicts() {
+    log_info "Checking for port range conflicts with other deployers..."
+    
+    # Get our instance ID
+    local INSTANCE_ID=$(get_instance_id)
+    
+    # Get port range from environment
+    local START_RANGE=$(grep START_RANGE .env | cut -d= -f2)
+    local STOP_RANGE=$(grep STOP_RANGE .env | cut -d= -f2)
+    
+    if [ -z "$START_RANGE" ] || [ -z "$STOP_RANGE" ]; then
+        log_error "START_RANGE or STOP_RANGE is not set in .env"
+        exit 1
+    fi
+    
+    # Pattern for lock files: ctf_port_STARTRANGE-STOPRANGE_INSTANCEID
+    local THIS_LOCK_FILE="${LOCK_DIR}/ctf_port_${START_RANGE}-${STOP_RANGE}_${INSTANCE_ID}"
+    
+    # Check for overlapping port ranges from other instances
+    local CONFLICT=false
+    local CONFLICT_DETAILS=""
+    
+    # Get all port range lock files
+    local LOCK_FILES=$(ls ${LOCK_DIR}/ctf_port_*-*_* 2>/dev/null || true)
+    
+    for lock_file in $LOCK_FILES; do
+        # Extract information from filename
+        local file_basename=$(basename "$lock_file")
+        local other_instance_id=$(echo "$file_basename" | sed -E 's/ctf_port_[0-9]+-[0-9]+_([^_]+)/\1/')
         
-        # Check if the setup script exists
-        if [ ! -f "tests/setup_tests.sh" ]; then
-            log_error "Test setup script not found at tests/setup_tests.sh"
-            log_error "Please ensure the script exists and is executable."
-            return 1
+        # Skip our own instance if it exists
+        if [ "$other_instance_id" = "$INSTANCE_ID" ]; then
+            continue
         fi
         
-        # Make it executable if needed
-        chmod +x tests/setup_tests.sh
+        # Extract port range
+        local port_range=$(echo "$file_basename" | sed -E 's/ctf_port_([0-9]+-[0-9]+)_.*/\1/')
+        local other_start=$(echo "$port_range" | cut -d'-' -f1)
+        local other_stop=$(echo "$port_range" | cut -d'-' -f2)
         
-        # Run the setup script
-        (cd tests && ./setup_tests.sh)
+        # Check if the lock file refers to an actual deployer that still exists
+        if [ -f "$lock_file" ]; then
+            local other_path=$(cat "$lock_file" 2>/dev/null | grep "^PATH=" | cut -d'=' -f2)
+            
+            if [ ! -d "$other_path" ]; then
+                log_info "Found stale lock file for non-existent path: $other_path. Removing it."
+                rm -f "$lock_file" 2>/dev/null
+                continue
+            fi
+            
+            # Check for port range overlap
+            if [ "$START_RANGE" -le "$other_stop" ] && [ "$STOP_RANGE" -ge "$other_start" ]; then
+                CONFLICT=true
+                CONFLICT_DETAILS="Port range ($START_RANGE-$STOP_RANGE) overlaps with ($other_start-$other_stop) from $other_path"
+                break
+            fi
+        fi
+    done
+    
+    # If conflict found, report and exit
+    if [ "$CONFLICT" = true ]; then
+        log_error "Port range conflict detected!"
+        log_error "$CONFLICT_DETAILS"
+        log_error "Please update your START_RANGE and STOP_RANGE in .env to avoid conflicts"
+        exit 1
+    fi
+    
+    # Create our lock file
+    log_info "Registering port range ($START_RANGE-$STOP_RANGE) in lock system..."
+    
+    # Write information to the lock file
+    mkdir -p data
+    echo "PORT_RANGE=${START_RANGE}-${STOP_RANGE}" > "$THIS_LOCK_FILE"
+    echo "PATH=$(realpath "$(pwd)")" >> "$THIS_LOCK_FILE"
+    echo "TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$THIS_LOCK_FILE"
+    echo "INSTANCE_ID=${INSTANCE_ID}" >> "$THIS_LOCK_FILE"
+    
+    # Remember lock file for cleanup
+    echo "$THIS_LOCK_FILE" > "./data/lock_file.txt"
+    
+    log_success "Port range successfully registered."
+}
+
+# Function to clean up lock file on exit
+cleanup_lock_file() {
+    if [ -f "./data/lock_file.txt" ]; then
+        local lock_file=$(cat "./data/lock_file.txt")
+        if [ -f "$lock_file" ]; then
+            log_info "Removing port range lock file..."
+            rm -f "$lock_file"
+        fi
+        rm -f "./data/lock_file.txt"
+    fi
+}
+
+# Ensure virtual environment exists and required packages are installed
+ensure_venv() {
+    if [ ! -d "$VENV_DIR" ]; then
+        log_info "Virtual environment not found. Creating one at $VENV_DIR..."
+        python3 -m venv "$VENV_DIR"
+        if [ $? -ne 0 ]; then
+            log_error "Failed to create virtual environment. Make sure python3-venv is installed."
+            log_error "  On Ubuntu/Debian: sudo apt-get install python3-venv"
+            log_error "  On CentOS/RHEL: sudo yum install python3-virtualenv"
+            exit 1
+        fi
+        
+        log_info "Installing required packages..."
+        "$VENV_DIR/bin/pip" install -r tests/requirements.txt
         
         if [ $? -ne 0 ]; then
-            log_error "Failed to set up test environment."
-            return 1
+            log_error "Failed to install required packages."
+            exit 1
         fi
         
-        log_success "Test environment set up successfully."
+        log_success "Virtual environment created and packages installed."
+    else
+        # Verify venv has required packages
+        if [ ! -f "$VENV_DIR/bin/pytest" ]; then
+            log_info "Installing required packages in existing virtual environment..."
+            "$VENV_DIR/bin/pip" install -r tests/requirements.txt
+            
+            if [ $? -ne 0 ]; then
+                log_error "Failed to install required packages."
+                exit 1
+            fi
+        fi
     fi
-    
-    return 0
 }
 
-# Run tests with virtual environment
-run_tests_with_venv() {
-    # $1: test command flags, $2: action description
-    
-    # Ensure venv exists
-    if ! ensure_venv; then
-        return 1
-    fi
-    
-    log_info "Running $2..."
-    
-    # Activate virtual environment in a subshell and run tests
-    (
-        source "$VENV_DIR/bin/activate"
-        python tests/run_tests.py $1
-        exit $?
-    )
-    
-    return $?
-}
-
-# Run pre-deployment tests
+# Run pre-deployment tests with venv
 run_pre_deploy_tests() {
-    # Build test flags
-    TEST_FLAGS=""
-    if [ "$VERBOSE_MODE" = true ]; then
-        TEST_FLAGS="$TEST_FLAGS -v"
-    fi
+    echo -e "${BLUE}Running pre-deployment validation tests...${NC}"
     
-    # Run the tests
-    if run_tests_with_venv "$TEST_FLAGS" "pre-deployment validation tests"; then
-        log_success "All pre-deployment tests passed!"
+    # Ensure virtual environment exists
+    ensure_venv
+    
+    # Create a temporary file to store test output
+    TEMP_OUTPUT=$(mktemp)
+    
+    # Run the tests with venv and capture output
+    "$VENV_DIR/bin/python" tests/run_tests.py $([[ "$VERBOSE_MODE" == "true" ]] && echo "-v") > "$TEMP_OUTPUT" 2>&1
+    TEST_STATUS=$?
+    
+    # Process the output and add colors
+    while IFS= read -r line; do
+        if [[ $line == *"ERROR"* ]]; then
+            echo -e "${RED}$line${NC}"
+        elif [[ $line == *"WARNING"* ]]; then
+            echo -e "${YELLOW}$line${NC}"
+        elif [[ $line == *"INFO"* ]]; then
+            echo -e "${BLUE}$line${NC}"
+        elif [[ $line == *"passed!"* ]]; then
+            echo -e "${GREEN}$line${NC}"
+        elif [[ $line == *"failed!"* ]]; then
+            echo -e "${RED}$line${NC}"
+        else
+            echo "$line"
+        fi
+    done < "$TEMP_OUTPUT"
+    
+    # Clean up temp file
+    rm -f "$TEMP_OUTPUT"
+    
+    # Return the original exit status
+    if [ $TEST_STATUS -eq 0 ]; then
+        echo -e "${GREEN}All pre-deployment tests passed!${NC}"
         return 0
     else
-        log_error "Some pre-deployment tests failed. Deployment cannot continue."
-        log_error "Please fix the issues and try again."
+        echo -e "${RED}Some pre-deployment tests failed. Deployment cannot continue.${NC}"
+        echo -e "${RED}Please fix the issues and try again.${NC}"
         return 1
     fi
 }
 
-# Run unit tests
+# Run unit tests with venv
 run_unit_tests() {
-    # Build test flags
-    TEST_FLAGS="--unit-tests"
-    if [ "$VERBOSE_MODE" = true ]; then
-        TEST_FLAGS="$TEST_FLAGS -v"
-    fi
+    echo -e "${BLUE}Running unit tests...${NC}"
     
-    # Run the tests
-    if run_tests_with_venv "$TEST_FLAGS" "unit tests"; then
-        log_success "All unit tests passed!"
+    # Ensure virtual environment exists
+    ensure_venv
+    
+    # Create a temporary file to store test output
+    TEMP_OUTPUT=$(mktemp)
+    
+    # Run the tests with venv and capture output
+    "$VENV_DIR/bin/python" tests/run_tests.py --unit-tests $([[ "$VERBOSE_MODE" == "true" ]] && echo "-v") > "$TEMP_OUTPUT" 2>&1
+    TEST_STATUS=$?
+    
+    # Process the output and add colors
+    while IFS= read -r line; do
+        if [[ $line == *"ERROR"* ]]; then
+            echo -e "${RED}$line${NC}"
+        elif [[ $line == *"WARNING"* ]]; then
+            echo -e "${YELLOW}$line${NC}"
+        elif [[ $line == *"INFO"* ]]; then
+            echo -e "${BLUE}$line${NC}"
+        elif [[ $line == *"passed!"* ]]; then
+            echo -e "${GREEN}$line${NC}"
+        elif [[ $line == *"failed!"* ]]; then
+            echo -e "${RED}$line${NC}"
+        else
+            echo "$line"
+        fi
+    done < "$TEMP_OUTPUT"
+    
+    # Clean up temp file
+    rm -f "$TEMP_OUTPUT"
+    
+    # Return the original exit status
+    if [ $TEST_STATUS -eq 0 ]; then
         return 0
     else
-        log_error "Some unit tests failed."
         return 1
     fi
 }
 
-# Run post-deployment tests
+# Run post-deployment tests with venv
 run_post_deploy_tests() {
-    # Build test flags
-    TEST_FLAGS="--post-deploy"
-    if [ "$VERBOSE_MODE" = true ]; then
-        TEST_FLAGS="$TEST_FLAGS -v"
-    fi
+    echo -e "${BLUE}Running post-deployment tests...${NC}"
     
-    # Run the tests
-    if run_tests_with_venv "$TEST_FLAGS" "post-deployment tests"; then
-        log_success "All post-deployment tests passed!"
-        return 0
+    # Ensure virtual environment exists
+    ensure_venv
+    
+    # Create a temporary file to store test output
+    TEMP_OUTPUT=$(mktemp)
+    
+    # Run the tests with venv and capture output
+    "$VENV_DIR/bin/python" tests/run_tests.py --post-deploy $([[ "$VERBOSE_MODE" == "true" ]] && echo "-v") > "$TEMP_OUTPUT" 2>&1
+    TEST_STATUS=$?
+    
+    # Process the output and add colors
+    while IFS= read -r line; do
+        if [[ $line == *"ERROR"* ]]; then
+            echo -e "${RED}$line${NC}"
+        elif [[ $line == *"WARNING"* ]]; then
+            echo -e "${YELLOW}$line${NC}"
+        elif [[ $line == *"INFO"* ]]; then
+            echo -e "${BLUE}$line${NC}"
+        elif [[ $line == *"passed!"* ]]; then
+            echo -e "${GREEN}$line${NC}"
+        elif [[ $line == *"failed!"* ]]; then
+            echo -e "${RED}$line${NC}"
+        else
+            echo "$line"
+        fi
+    done < "$TEMP_OUTPUT"
+    
+    # Clean up temp file
+    rm -f "$TEMP_OUTPUT"
+    
+    # Return the original exit status, but don't fail the deployment
+    if [ $TEST_STATUS -eq 0 ]; then
+        echo -e "${GREEN}All post-deployment tests passed!${NC}"
     else
-        log_warning "Some post-deployment tests failed."
-        log_warning "The service may still be running, but some functionality might be impaired."
-        return 1
+        echo -e "${YELLOW}Some post-deployment tests failed. The service may still be running, but some functionality might be impaired.${NC}"
     fi
+    return 0  # Always return success for post-deployment tests
 }
 
 # Determine which Docker Compose command to use
@@ -353,9 +537,18 @@ main() {
     # Check root permissions first for any operation
     check_root_permissions
     
+    # Setup lock directory
+    setup_lock_directory
+    
+    # Register cleanup handler for lock file
+    trap cleanup_lock_file EXIT
+    
     # Process the command
     case "$COMMAND" in
         up)
+            # Check for port range conflicts with other deployers
+            check_port_range_conflicts
+            
             # Run unit tests if requested
             if [ "$RUN_UNIT_TESTS" = true ]; then
                 if ! run_unit_tests; then

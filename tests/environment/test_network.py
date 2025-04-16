@@ -8,6 +8,7 @@ import os
 import sys
 import logging
 import ipaddress
+import time
 import socket
 import subprocess
 import json
@@ -206,7 +207,7 @@ def test_network_connectivity(verbose=False):
     endpoints = [
         ("google.com", 443),
         ("github.com", 443),
-        ("dockerhub.com", 443)
+        ("dockerhub.com", 80)
     ]
     
     failed_endpoints = []

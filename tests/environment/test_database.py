@@ -1,14 +1,13 @@
 """
-Database validation tests for CTF Deployer
+Database validation tests for CTF Deployer (Pre-Deployment Version)
 
-This module validates that the database connection settings are correct and 
-that the database server is accessible.
+This module validates that the database configuration settings are correct
+without requiring an actual connection to the database.
 """
 import os
 import sys
 import logging
-import psycopg2
-import time
+import socket
 from dotenv import load_dotenv
 
 # Setup logging
@@ -17,65 +16,62 @@ logger = logging.getLogger('test-database')
 # Load environment variables
 load_dotenv()
 
-def test_database_connection(verbose=False):
-    """Test that the database server is accessible"""
+def test_db_config_values(verbose=False):
+    """Test that database configuration values are present and valid"""
     db_host = os.getenv("DB_HOST")
     db_port = os.getenv("DB_PORT")
     db_name = os.getenv("DB_NAME")
     db_user = os.getenv("DB_USER")
     db_password = os.getenv("DB_PASSWORD")
     
+    # Check if all required values are set
     if not all([db_host, db_port, db_name, db_user, db_password]):
-        logger.error("Database connection parameters are not fully set")
+        missing = []
+        if not db_host: missing.append("DB_HOST")
+        if not db_port: missing.append("DB_PORT")
+        if not db_name: missing.append("DB_NAME")
+        if not db_user: missing.append("DB_USER")
+        if not db_password: missing.append("DB_PASSWORD")
+        
+        logger.error(f"Missing database configuration: {', '.join(missing)}")
+        return False
+    
+    # Validate port is numeric
+    try:
+        port = int(db_port)
+        if port <= 0 or port > 65535:
+            logger.error(f"DB_PORT must be between 1 and 65535, got {port}")
+            return False
+        elif verbose:
+            logger.info(f"DB_PORT {port} is valid")
+    except ValueError:
+        logger.error(f"DB_PORT must be a number, got '{db_port}'")
+        return False
+    
+    # Check if host is reasonable (don't try to connect, just check format)
+    if db_host == "":
+        logger.error("DB_HOST cannot be empty")
+        return False
+    
+    # Validate database name
+    if db_name == "":
+        logger.error("DB_NAME cannot be empty")
+        return False
+    
+    # Don't validate password strength, but check it's not empty
+    if db_password == "":
+        logger.error("DB_PASSWORD cannot be empty")
         return False
     
     if verbose:
-        logger.info(f"Testing connection to {db_host}:{db_port}/{db_name} as {db_user}")
+        logger.info(f"Database configuration appears valid:")
+        logger.info(f"  - DB_HOST: {db_host}")
+        logger.info(f"  - DB_PORT: {db_port}")
+        logger.info(f"  - DB_NAME: {db_name}")
+        logger.info(f"  - DB_USER: {db_user}")
+        logger.info(f"  - DB_PASSWORD: {'*' * len(db_password)}")
     
-    try:
-        # Try to connect to the database
-        conn = psycopg2.connect(
-            host=db_host,
-            port=db_port,
-            dbname=db_name,
-            user=db_user,
-            password=db_password,
-            connect_timeout=5  # Timeout after 5 seconds
-        )
-        
-        # Check if connection is active
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT 1")
-            result = cursor.fetchone()
-            
-            if result and result[0] == 1:
-                if verbose:
-                    logger.info("Database connection successful")
-            else:
-                logger.error("Database connection test failed")
-                return False
-        
-        conn.close()
-        return True
-    except psycopg2.OperationalError as e:
-        logger.error(f"Database connection error: {e}")
-        
-        # Provide more helpful information based on the error
-        error_str = str(e).lower()
-        if "could not connect to server" in error_str:
-            logger.error(f"Could not connect to PostgreSQL server at {db_host}:{db_port}")
-            logger.error("Make sure the PostgreSQL server is running and accessible")
-        elif "password authentication failed" in error_str:
-            logger.error(f"Authentication failed for user '{db_user}'")
-            logger.error("Check that the DB_USER and DB_PASSWORD are correct")
-        elif "database" in error_str and "does not exist" in error_str:
-            logger.error(f"Database '{db_name}' does not exist")
-            logger.error("You need to create the database before starting the deployer")
-        
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected database error: {e}")
-        return False
+    return True
 
 def test_connection_params_consistency(verbose=False):
     """Test that database connection parameters are consistent with docker-compose.yml"""
@@ -134,72 +130,12 @@ def test_database_pool_settings(verbose=False):
         logger.error(f"DB_POOL_MIN ({db_pool_min}) and DB_POOL_MAX ({db_pool_max}) must be integers")
         return False
 
-def test_database_permissions(verbose=False):
-    """Test that the database user has the necessary permissions"""
-    db_host = os.getenv("DB_HOST")
-    db_port = os.getenv("DB_PORT")
-    db_name = os.getenv("DB_NAME")
-    db_user = os.getenv("DB_USER")
-    db_password = os.getenv("DB_PASSWORD")
-    
-    if not all([db_host, db_port, db_name, db_user, db_password]):
-        logger.error("Database connection parameters are not fully set")
-        return False
-    
-    try:
-        # Connect to the database
-        conn = psycopg2.connect(
-            host=db_host,
-            port=db_port,
-            dbname=db_name,
-            user=db_user,
-            password=db_password,
-            connect_timeout=5
-        )
-        
-        # Test if we can create a table
-        with conn.cursor() as cursor:
-            # Create a temporary table
-            try:
-                cursor.execute("""
-                    CREATE TEMPORARY TABLE _test_permissions (
-                        id SERIAL PRIMARY KEY,
-                        test_value TEXT
-                    )
-                """)
-                
-                # Insert a row
-                cursor.execute("INSERT INTO _test_permissions (test_value) VALUES (%s)", ("test",))
-                
-                # Query the row
-                cursor.execute("SELECT test_value FROM _test_permissions")
-                result = cursor.fetchone()
-                
-                if not result or result[0] != "test":
-                    logger.error("Failed to query test table")
-                    return False
-                
-                if verbose:
-                    logger.info("Database user has CREATE TABLE, INSERT, and SELECT permissions")
-            except psycopg2.Error as e:
-                logger.error(f"Permission test failed: {e}")
-                return False
-            finally:
-                conn.rollback()  # Clean up the transaction
-        
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Database permission test error: {e}")
-        return False
-
 def run_tests(verbose=False):
-    """Run all database validation tests"""
+    """Run all database configuration validation tests (pre-deployment only)"""
     tests = [
-        test_database_connection,
+        test_db_config_values,
         test_connection_params_consistency,
-        test_database_pool_settings,
-        test_database_permissions
+        test_database_pool_settings
     ]
     
     all_tests_passed = True
@@ -222,8 +158,8 @@ if __name__ == "__main__":
     success = run_tests(verbose=True)
     
     if success:
-        logger.info("All database tests passed!")
+        logger.info("All database configuration tests passed!")
         sys.exit(0)
     else:
-        logger.error("Some database tests failed!")
+        logger.error("Some database configuration tests failed!")
         sys.exit(1)

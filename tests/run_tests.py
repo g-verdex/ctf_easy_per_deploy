@@ -3,14 +3,16 @@
 Test runner for CTF Deployer validation tests
 
 This script runs pre-deployment validation tests to ensure the environment
-is properly configured before deploying the application.
+is properly configured before deploying the application, or post-deployment
+tests to verify the deployed application.
 
 Usage:
   python run_tests.py [options]
 
 Options:
   --verbose, -v     Enable verbose output
-  --post-deploy, -p Run post-deployment tests
+  --post-deploy, -p Run post-deployment tests (requires running services)
+  --unit-tests, -u  Run unit tests
   --help, -h        Show this help message
 """
 
@@ -19,6 +21,7 @@ import sys
 import importlib
 import os
 import logging
+import traceback
 from dotenv import load_dotenv
 import time
 import subprocess
@@ -55,11 +58,12 @@ def discover_test_modules(test_dir="environment"):
                 logger.debug(f"Loaded test module: {module_path}")
             except ImportError as e:
                 logger.error(f"Failed to import {module_path}: {e}")
+                logger.error(traceback.format_exc())
     
     return modules
 
 def run_pre_deploy_tests(verbose=False):
-    """Run all environment validation tests"""
+    """Run all environment validation tests (pre-deployment)"""
     test_modules = discover_test_modules("environment")
     
     if not test_modules:
@@ -83,53 +87,83 @@ def run_pre_deploy_tests(verbose=False):
                 else:
                     logger.info(f"{module_name} tests passed")
             except Exception as e:
-                logger.error(f"Error running {module_name} tests: {e}", exc_info=True)
+                logger.error(f"Error running {module_name} tests: {e}")
+                logger.error(traceback.format_exc())
                 success = False
         else:
             logger.warning(f"{module_name} has no run_tests function")
+            logger.warning(f"Module contents: {dir(module)}")
     
     return success
 
 def run_post_deploy_tests(verbose=False):
     """Run all post-deployment tests"""
-    success = True
+    # First check if the post_deploy directory exists
+    post_deploy_dir = os.path.join(os.path.dirname(__file__), "post_deploy")
+    if not os.path.exists(post_deploy_dir):
+        os.makedirs(post_deploy_dir, exist_ok=True)
+        logger.info(f"Created post_deploy directory: {post_deploy_dir}")
     
-    # First run the API tests
-    logger.info("Running API tests...")
-    try:
-        api_test_path = os.path.join(os.path.dirname(__file__), "..", "tests", "api_test.sh")
-        if not os.path.exists(api_test_path):
-            logger.warning(f"API test script not found at {api_test_path}")
-            return False
-        
-        # Make sure the script is executable
-        os.chmod(api_test_path, 0o755)
-        
-        # Run the API tests
-        result = subprocess.run(
-            [api_test_path], 
-            check=False,
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode != 0:
-            logger.error(f"API tests failed with code {result.returncode}")
-            logger.error(f"Output: {result.stdout}")
-            logger.error(f"Errors: {result.stderr}")
-            success = False
-        else:
-            logger.info("API tests passed")
-            if verbose:
-                print(result.stdout)
-    except Exception as e:
-        logger.error(f"Error running API tests: {e}", exc_info=True)
-        success = False
+    # Discover and run post-deployment test modules
+    test_modules = discover_test_modules("post_deploy")
     
-    # Run any additional post-deployment tests
-    # For now, we just have the API tests, but we can add more later
+    # Run API tests if the script exists
+    api_test_success = True
+    api_test_path = os.path.join(os.path.dirname(__file__), "api", "api_test.sh")
+    if os.path.exists(api_test_path):
+        logger.info("Running API tests...")
+        try:
+            # Make sure the script is executable
+            os.chmod(api_test_path, 0o755)
+            
+            # Run the API tests
+            result = subprocess.run(
+                [api_test_path], 
+                check=False,
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"API tests failed with code {result.returncode}")
+                logger.error(f"Output: {result.stdout}")
+                logger.error(f"Errors: {result.stderr}")
+                api_test_success = False
+            else:
+                logger.info("API tests passed")
+                if verbose:
+                    print(result.stdout)
+        except Exception as e:
+            logger.error(f"Error running API tests: {e}")
+            logger.error(traceback.format_exc())
+            api_test_success = False
     
-    return success
+    # Run post-deployment test modules
+    module_success = True
+    if test_modules:
+        logger.info(f"Running {len(test_modules)} post-deployment test modules")
+        
+        for module in test_modules:
+            module_name = module.__name__.split('.')[-1]
+            logger.info(f"Running {module_name} post-deployment tests...")
+            
+            if hasattr(module, 'run_tests'):
+                try:
+                    if not module.run_tests(verbose):
+                        logger.error(f"{module_name} post-deployment tests failed")
+                        module_success = False
+                    else:
+                        logger.info(f"{module_name} post-deployment tests passed")
+                except Exception as e:
+                    logger.error(f"Error running {module_name} post-deployment tests: {e}")
+                    logger.error(traceback.format_exc())
+                    module_success = False
+            else:
+                logger.warning(f"{module_name} has no run_tests function")
+    else:
+        logger.warning("No post-deployment test modules found")
+    
+    return api_test_success and module_success
 
 def run_unit_tests(verbose=False):
     """Run unit tests using pytest"""
@@ -137,9 +171,30 @@ def run_unit_tests(verbose=False):
     
     try:
         # Build the pytest command
-        pytest_cmd = ["python", "-m", "pytest", "tests/test_database_minimal.py"]
+        pytest_cmd = ["python", "-m", "pytest"]
+        
+        # Add the specific test module paths
+        test_modules = []
+        unit_tests_dir = os.path.join(os.path.dirname(__file__), "unit")
+        
+        if os.path.exists(unit_tests_dir):
+            for filename in os.listdir(unit_tests_dir):
+                if filename.startswith("test_") and filename.endswith(".py"):
+                    module_path = os.path.join("tests", "unit", filename)
+                    test_modules.append(module_path)
+        
+        if not test_modules:
+            logger.warning("No unit test modules found!")
+            # Look for test_database_minimal.py in the current directory as fallback
+            if os.path.exists(os.path.join(os.path.dirname(__file__), "test_database_minimal.py")):
+                test_modules.append(os.path.join("tests", "test_database_minimal.py"))
+        
+        pytest_cmd.extend(test_modules)
+        
         if verbose:
             pytest_cmd.append("-v")
+        
+        logger.info(f"Running pytest with command: {' '.join(pytest_cmd)}")
         
         # Run pytest
         result = subprocess.run(
@@ -160,7 +215,8 @@ def run_unit_tests(verbose=False):
                 print(result.stdout)
             return True
     except Exception as e:
-        logger.error(f"Error running unit tests: {e}", exc_info=True)
+        logger.error(f"Error running unit tests: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 if __name__ == "__main__":
