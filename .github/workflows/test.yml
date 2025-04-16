@@ -2,9 +2,9 @@ name: CTF Deployer Tests
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ main, master, develop, test ]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, master, develop, test ]
 
 jobs:
   test:

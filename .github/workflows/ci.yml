@@ -2,9 +2,9 @@ name: CTF Deployer CI
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ main, master, develop, tests]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, master, develop, tests ]
 
 jobs:
   lint:
